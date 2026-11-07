@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="16dp"
+    android:background="@drawable/bg_card"
+    android:clickable="true"
+    android:focusable="true"
+    android:foreground="?android:attr/selectableItemBackground"
+    android:orientation="vertical"
+    android:padding="22dp">
+
+    <TextView
+        android:id="@+id/name"
+        style="@style/Title"
+        android:ellipsize="end"
+        android:maxLines="1" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView android:id="@+id/status" style="@style/StatusPill" />
+
+        <TextView
+            android:id="@+id/distance"
+            style="@style/Metric"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:gravity="end" />
+    </LinearLayout>
+
+    <com.example.myapplication.ui.ChargerBar
+        android:id="@+id/bar"
+        android:layout_width="match_parent"
+        android:layout_height="12dp"
+        android:layout_marginTop="16dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/charging"
+            style="@style/Secondary"
+            android:layout_width="0dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/rangeTag"
+            style="@style/Secondary"
+            android:layout_width="wrap_content"
+            android:text="@string/in_range"
+            android:textColor="@color/accent_free"
+            android:textStyle="bold" />
+    </LinearLayout>
+</LinearLayout>

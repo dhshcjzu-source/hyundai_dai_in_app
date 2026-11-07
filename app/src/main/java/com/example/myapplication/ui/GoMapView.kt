@@ -1,0 +1,783 @@
+package com.example.myapplication.ui
+
+import android.animation.ValueAnimator
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Shader
+import android.util.AttributeSet
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.View
+import android.view.ViewConfiguration
+import com.example.myapplication.model.Ambience
+import com.example.myapplication.model.GeoPoint
+import com.example.myapplication.model.Station
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/**
+ * 포켓몬 GO처럼 내 차를 중심에 두고 비스듬히 내려다보는 지도.
+ * 도로와 공원은 장식용으로 생성한 배경이며 실제 지도가 아니다.
+ * 충전소의 상대 위치와 예약 가능 반경만 실제 거리 기준으로 그린다.
+ */
+class GoMapView @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null,
+) : View(context, attrs) {
+
+    var onStationTapped: ((String) -> Unit)? = null
+
+    private var origin: GeoPoint? = null
+    private var car: GeoPoint? = null
+    private var heading = 0f
+    private var stations: List<Station> = emptyList()
+    private var selectedId: String? = null
+    private var reservedStationId: String? = null
+    private var reserveRadius = 0.0
+
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+    }
+    private val path = Path()
+    private val carModel = CarModel()
+    private val oval = RectF()
+    private val quadRight = FloatArray(4)
+    private val quadForward = FloatArray(4)
+    private var pathStarted = false
+    private val markerHits = HashMap<String, Triple<Float, Float, Float>>()
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downX = 0f
+    private var downY = 0f
+    /** 지도 확대 배율. 1이 기본이고 두 손가락으로 조절한다. */
+    var zoom = 1f
+        private set
+
+    /** 애니메이션이 끝났을 때의 배율. 연속으로 눌러도 단계가 누적된다. */
+    private var zoomTarget = 1f
+    private var zoomAnimator: ValueAnimator? = null
+
+    /** 확대, 축소 가능 여부가 바뀔 수 있을 때 호출된다. */
+    var onZoomLimitsChanged: (() -> Unit)? = null
+    val canZoomIn get() = zoomTarget < MAX_ZOOM
+    val canZoomOut get() = zoomTarget > MIN_ZOOM
+
+    /** 카메라가 바라보는 방위각(북=0, 동=90). 항상 내 차를 축으로 돈다. */
+    var bearing = 0f
+        private set
+    private var bearingSin = 0f
+    private var bearingCos = 1f
+    private var bearingAnimator: ValueAnimator? = null
+
+    /** 켜면 한 손가락으로 끌 때 지도를 옮기는 대신 내 차를 중심으로 돌린다. */
+    var rotateMode = false
+
+    /** [bearing]이 바뀔 때 호출된다. */
+    var onBearingChanged: (() -> Unit)? = null
+
+    private var lastTwistAngle = 0f
+    private var twistTotal = 0f
+    private var twisting = false
+
+    // 내 차를 기준으로 카메라를 옮긴 거리(미터). 화면 오른쪽, 화면 안쪽 방향이며 지도를 끌면 바뀐다.
+    private var panRight = 0f
+    private var panForward = 0f
+    private var panAnimator: ValueAnimator? = null
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var dragging = false
+
+    /** 지도를 옮겨 카메라가 내 차에서 벗어나 있는지 여부. */
+    val isPanned get() = panRight != 0f || panForward != 0f
+
+    /** 내 차의 화면 좌표. 테스트에서 기준점이 유지되는지 확인할 때 쓴다. */
+    val carScreenX get() = screenX(-panRight, -panForward)
+    val carScreenY get() = screenY(-panForward)
+
+    /** [isPanned]가 바뀔 수 있을 때 호출된다. */
+    var onPanChanged: (() -> Unit)? = null
+
+    /** 이번 터치에 두 손가락이 닿았으면 손을 뗄 때 충전소 선택으로 처리하지 않는다. */
+    private var gestureHadMultipleFingers = false
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                setZoomDirectly(zoom * detector.scaleFactor)
+                return true
+            }
+        },
+    ).apply { isQuickScaleEnabled = false }
+
+    private val nearY get() = NEAR_Y / zoom
+    private val carScale get() = sqrt(zoom).coerceIn(MIN_CAR_SCALE, MAX_CAR_SCALE)
+
+    private var fadeShader: Shader? = null
+    private var skyShader: Shader? = null
+    private var ambience: Ambience? = null
+
+    // 투영 매개변수. onSizeChanged에서 화면 크기에 맞춘다.
+    private var centerX = 0f
+    private var horizonY = 0f
+    private var focal = 0f
+    private var unit = 1f
+
+    /** 카메라를 북쪽 방향으로 되돌린다. 더 가까운 쪽으로 돈다. */
+    fun resetBearing() {
+        bearingAnimator?.cancel()
+        val start = if (bearing > 180f) bearing - 360f else bearing
+        if (start == 0f) return
+        bearingAnimator = ValueAnimator.ofFloat(start, 0f).apply {
+            duration = BEARING_RESET_MS
+            addUpdateListener { applyBearing(it.animatedValue as Float) }
+            start()
+        }
+    }
+
+    private fun rotateBy(degrees: Float) {
+        bearingAnimator?.cancel()
+        applyBearing(bearing + degrees)
+    }
+
+    private fun applyBearing(degrees: Float) {
+        bearing = ((degrees % 360f) + 360f) % 360f
+        val radians = Math.toRadians(bearing.toDouble())
+        bearingSin = sin(radians).toFloat()
+        bearingCos = cos(radians).toFloat()
+        onBearingChanged?.invoke()
+    }
+
+    // 동쪽, 북쪽 좌표와 화면 기준(오른쪽, 안쪽) 좌표를 서로 바꾼다.
+    private fun toViewX(east: Float, north: Float) = east * bearingCos - north * bearingSin
+    private fun toViewY(east: Float, north: Float) = east * bearingSin + north * bearingCos
+    private fun toEast(right: Float, forward: Float) = right * bearingCos + forward * bearingSin
+    private fun toNorth(right: Float, forward: Float) = -right * bearingSin + forward * bearingCos
+
+    fun zoomIn() = animateZoomTo(zoomTarget * ZOOM_STEP)
+
+    fun zoomOut() = animateZoomTo(zoomTarget / ZOOM_STEP)
+
+    private fun setZoomDirectly(value: Float) {
+        zoomAnimator?.cancel()
+        applyZoom(value.coerceIn(MIN_ZOOM, MAX_ZOOM))
+        zoomTarget = zoom
+        onZoomLimitsChanged?.invoke()
+    }
+
+    /**
+     * 항상 내 차를 기준으로 확대, 축소한다. 지도를 옮긴 상태에서도 차가 화면의 같은 자리에 남도록
+     * 카메라 거리를 배율에 반비례해 조절한다.
+     */
+    private fun applyZoom(value: Float) {
+        val ratio = zoom / value
+        panRight = (panRight * ratio).coerceIn(-MAX_PAN, MAX_PAN)
+        panForward = (panForward * ratio).coerceIn(-MAX_PAN, MAX_PAN)
+        zoom = value
+    }
+
+    private fun animateZoomTo(target: Float) {
+        zoomTarget = target.coerceIn(MIN_ZOOM, MAX_ZOOM)
+        zoomAnimator?.cancel()
+        zoomAnimator = ValueAnimator.ofFloat(zoom, zoomTarget).apply {
+            duration = ZOOM_ANIMATION_MS
+            addUpdateListener { applyZoom(it.animatedValue as Float) }
+            start()
+        }
+        onZoomLimitsChanged?.invoke()
+    }
+
+    /** 카메라를 내 차로 되돌린다. */
+    fun recenter() {
+        panAnimator?.cancel()
+        if (!isPanned) return
+        val startEast = panRight
+        val startNorth = panForward
+        panAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
+            duration = RECENTER_ANIMATION_MS
+            addUpdateListener {
+                val remaining = it.animatedValue as Float
+                panRight = startEast * remaining
+                panForward = startNorth * remaining
+                onPanChanged?.invoke()
+            }
+            start()
+        }
+    }
+
+    /**
+     * 끈 만큼 지도를 옮긴다. 어디를 짚어도 같은 속도가 되도록 내 차 위치의 축척을 쓴다.
+     * 짚은 지점의 축척을 쓰면 지평선 근처에서 조금만 끌어도 수 km를 건너뛴다.
+     */
+    private fun panBy(deltaX: Float, deltaY: Float) {
+        val metersPerPixelX = CAMERA_BACK / (focal * zoom)
+        val metersPerPixelY = CAMERA_BACK * CAMERA_BACK / (focal * CAMERA_HEIGHT * zoom)
+        panRight = (panRight - deltaX * metersPerPixelX).coerceIn(-MAX_PAN, MAX_PAN)
+        panForward = (panForward + deltaY * metersPerPixelY).coerceIn(-MAX_PAN, MAX_PAN)
+        onPanChanged?.invoke()
+    }
+
+    fun setCar(position: GeoPoint, headingDegrees: Float) {
+        if (origin == null) origin = position
+        car = position
+        heading = headingDegrees
+    }
+
+    fun setStations(
+        stations: List<Station>,
+        selectedId: String?,
+        reservedStationId: String?,
+        reserveRadiusMeters: Double,
+    ) {
+        this.stations = stations
+        this.selectedId = selectedId
+        this.reservedStationId = reservedStationId
+        this.reserveRadius = reserveRadiusMeters
+    }
+
+    fun setAmbience(next: Ambience) {
+        if (next == ambience) return
+        val skyChanged = next.skyTop != ambience?.skyTop || next.skyBottom != ambience?.skyBottom
+        ambience = next
+        carModel.setTint(next.carTint)
+        if (skyChanged) rebuildSkyShaders()
+    }
+
+    private fun rebuildSkyShaders() {
+        val colors = ambience ?: return
+        if (height == 0) return
+        skyShader = LinearGradient(0f, 0f, 0f, horizonY, colors.skyTop, colors.skyBottom, Shader.TileMode.CLAMP)
+        fadeShader = LinearGradient(
+            0f, horizonY, 0f, horizonY + height * 0.14f,
+            colors.skyBottom, colors.skyBottom and 0x00FFFFFF, Shader.TileMode.CLAMP,
+        )
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        centerX = w / 2f
+        horizonY = h * 0.14f
+        focal = h * 0.72f
+        unit = min(w, h) / 1440f
+        rebuildSkyShaders()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val position = car ?: return
+        val look = ambience ?: return
+        // 부동소수 정밀도가 떨어지지 않도록 하루 단위로 잘라 쓴다.
+        val time = (System.currentTimeMillis() % 86_400_000L) / 1000f
+        canvas.drawColor(look.ground)
+        drawBackground(canvas, position, look, time)
+        drawRangeRing(canvas, look, time)
+        drawStations(canvas, position, time)
+        drawCar(canvas, look, time)
+        drawPrecipitation(canvas, look, time)
+        postInvalidateOnAnimation()
+    }
+
+    private fun drawBackground(canvas: Canvas, position: GeoPoint, look: Ambience, time: Float) {
+        val (baseEast, baseNorth) = position.metersFrom(origin ?: position)
+        val cameraEast = baseEast + toEast(panRight, panForward)
+        val cameraNorth = baseNorth + toNorth(panRight, panForward)
+        val viewSide = VIEW_SIDE / zoom
+        val viewBack = VIEW_BACK / zoom
+        val viewFront = VIEW_FRONT / zoom
+
+        // 돌아간 시야 사각형을 모두 덮는 동서남북 범위. 회전이 없으면 시야 사각형과 같다.
+        val spanEast = abs(viewSide * bearingCos)
+        val spanNorth = abs(viewSide * bearingSin)
+        val minEast = min(toEast(0f, viewBack), toEast(0f, viewFront)) - spanEast
+        val maxEast = max(toEast(0f, viewBack), toEast(0f, viewFront)) + spanEast
+        val minNorth = min(toNorth(0f, viewBack), toNorth(0f, viewFront)) - spanNorth
+        val maxNorth = max(toNorth(0f, viewBack), toNorth(0f, viewFront)) + spanNorth
+        val firstCellX = floor((cameraEast + minEast) / BLOCK).toInt()
+        val lastCellX = floor((cameraEast + maxEast) / BLOCK).toInt()
+        val firstCellY = floor((cameraNorth + minNorth) / BLOCK).toInt()
+        val lastCellY = floor((cameraNorth + maxNorth) / BLOCK).toInt()
+
+        // 공원: 위치에서 결정되는 해시로 고르므로 이동해도 같은 자리에 남는다.
+        fill.color = look.park
+        for (cellY in firstCellY..lastCellY) for (cellX in firstCellX..lastCellX) {
+            if ((cellX * 73856093 xor cellY * 19349663).mod(7) != 0) continue
+            val x0 = (cellX * BLOCK - cameraEast).toFloat() + ROAD_MARGIN
+            val y0 = (cellY * BLOCK - cameraNorth).toFloat() + ROAD_MARGIN
+            val size = BLOCK.toFloat() - ROAD_MARGIN * 2
+            val middleRight = toViewX(x0 + size / 2, y0 + size / 2)
+            val middleForward = toViewY(x0 + size / 2, y0 + size / 2)
+            if (abs(middleRight) > viewSide + BLOCK || middleForward < viewBack - BLOCK || middleForward > viewFront + BLOCK) continue
+            drawGroundQuad(canvas, x0, y0, x0 + size, y0 + size)
+        }
+
+        // 도로: 남북 방향, 동서 방향 격자
+        for (cellX in firstCellX..lastCellX + 1) {
+            val major = cellX.mod(4) == 0
+            val x = (cellX * BLOCK - cameraEast).toFloat()
+            val half = if (major) MAJOR_ROAD else MINOR_ROAD
+            fill.color = if (major) look.majorRoad else look.minorRoad
+            drawGroundQuad(canvas, x - half, minNorth, x + half, maxNorth)
+        }
+        for (cellY in firstCellY..lastCellY + 1) {
+            val major = cellY.mod(4) == 0
+            val y = (cellY * BLOCK - cameraNorth).toFloat()
+            val half = if (major) MAJOR_ROAD else MINOR_ROAD
+            fill.color = if (major) look.majorRoad else look.minorRoad
+            drawGroundQuad(canvas, minEast, y - half, maxEast, y + half)
+        }
+
+        drawSky(canvas, look, time)
+    }
+
+    private fun drawSky(canvas: Canvas, look: Ambience, time: Float) {
+        // 카메라가 돌면 하늘도 함께 흘러간다. 한 바퀴에 화면 SKY_SCREENS_PER_TURN개만큼 움직인다.
+        val skyShift = bearing / 360f * SKY_SCREENS_PER_TURN
+        fill.shader = skyShader
+        canvas.drawRect(0f, 0f, width.toFloat(), horizonY, fill)
+        fill.shader = null
+
+        if (look.stars > 0f) {
+            for (i in 0 until STAR_COUNT) {
+                val x = fract(i * 0.6180339f - skyShift) * width
+                val y = fract(i * 0.3247179f) * horizonY * 0.92f
+                val twinkle = 0.6f + 0.4f * sin(time * 1.7f + i)
+                fill.color = Color.WHITE
+                fill.alpha = (look.stars * twinkle * 230).toInt()
+                canvas.drawCircle(x, y, (1.2f + fract(i * 0.77f) * 1.6f) * unit, fill)
+            }
+        }
+        // 해와 달은 하늘의 한 지점에 있으므로 돌리는 동안 화면 밖으로 나갈 수 있다.
+        val skySpan = width * SKY_SCREENS_PER_TURN
+        val celestialX = fract((look.celestialX - skyShift + 0.5f) / SKY_SCREENS_PER_TURN) * skySpan - width * 0.5f
+        val celestialY = horizonY * 0.5f
+        if (look.sun > 0f) {
+            fill.color = SUN_COLOR
+            fill.alpha = (look.sun * 70).toInt()
+            canvas.drawCircle(celestialX, celestialY, 78f * unit, fill)
+            fill.alpha = (look.sun * 255).toInt()
+            canvas.drawCircle(celestialX, celestialY, 46f * unit, fill)
+        }
+        if (look.moon > 0f) {
+            fill.color = MOON_COLOR
+            fill.alpha = (look.moon * 60).toInt()
+            canvas.drawCircle(celestialX, celestialY, 66f * unit, fill)
+            fill.alpha = (look.moon * 255).toInt()
+            canvas.drawCircle(celestialX, celestialY, 40f * unit, fill)
+            fill.color = look.skyTop
+            fill.alpha = (look.moon * 255).toInt()
+            canvas.drawCircle(celestialX + 16f * unit, celestialY - 7f * unit, 33f * unit, fill)
+        }
+        if (look.clouds > 0.08f) {
+            // 뭉치가 겹쳐도 진해지지 않도록 불투명하게 그린 뒤 레이어 전체를 반투명하게 합친다.
+            val count = (look.clouds * CLOUD_COUNT).toInt().coerceAtLeast(1)
+            val layer = canvas.saveLayerAlpha(0f, 0f, width.toFloat(), horizonY + 40f * unit, (140 + look.clouds * 90).toInt())
+            fill.color = desaturatedCloud(look)
+            for (i in 0 until count) {
+                val span = width + 500f * unit
+                val x = fract(i * 0.381966f + time * 0.002f * (1f + fract(i * 0.53f)) - skyShift * width / span) * span - 250f * unit
+                val y = horizonY * (0.3f + fract(i * 0.7548f) * 0.55f)
+                val size = (34f + fract(i * 0.5698f) * 30f) * unit
+                canvas.drawRoundRect(x - size * 2.3f, y - size * 0.3f, x + size * 2.3f, y + size * 0.55f, size * 0.42f, size * 0.42f, fill)
+                canvas.drawCircle(x - size * 1.15f, y - size * 0.25f, size * 0.62f, fill)
+                canvas.drawCircle(x - size * 0.2f, y - size * 0.55f, size * 0.95f, fill)
+                canvas.drawCircle(x + size * 0.95f, y - size * 0.3f, size * 0.7f, fill)
+            }
+            canvas.restoreToCount(layer)
+        }
+
+        fill.alpha = 255
+        fill.shader = fadeShader
+        canvas.drawRect(0f, horizonY, width.toFloat(), horizonY + height * 0.14f, fill)
+        fill.shader = null
+    }
+
+    private fun desaturatedCloud(look: Ambience): Int {
+        val brightness = Ambience.luminance(look.skyBottom) / 255f
+        val level = (90 + brightness * 165).toInt().coerceIn(0, 255)
+        return Color.rgb(level, level, level)
+    }
+
+    private fun drawPrecipitation(canvas: Canvas, look: Ambience, time: Float) {
+        if (look.fog > 0f) {
+            fill.color = desaturatedCloud(look)
+            fill.alpha = (look.fog * 255).toInt()
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+        }
+        if (look.rain > 0f) {
+            stroke.color = RAIN_COLOR
+            stroke.alpha = 150
+            stroke.strokeWidth = 2.5f * unit
+            val length = 46f * unit
+            for (i in 0 until (look.rain * RAIN_COUNT).toInt()) {
+                val speed = 1.4f + fract(i * 0.419f)
+                val x = fract(i * 0.6180339f + time * speed * 0.035f) * width
+                val y = fract(i * 0.7548776f + time * speed * 0.9f) * height
+                canvas.drawLine(x, y, x - length * 0.16f, y + length, stroke)
+            }
+        }
+        if (look.snow > 0f) {
+            fill.color = Color.WHITE
+            fill.alpha = 225
+            for (i in 0 until (look.snow * SNOW_COUNT).toInt()) {
+                val speed = 0.5f + fract(i * 0.419f)
+                val sway = sin(time * speed + i) * 18f * unit
+                val x = fract(i * 0.6180339f) * width + sway
+                val y = fract(i * 0.7548776f + time * speed * 0.055f) * height
+                canvas.drawCircle(x, y, (2.5f + fract(i * 0.31f) * 3.5f) * unit, fill)
+            }
+        }
+        if (look.lightning) {
+            // 약 9초에 한 번, 위치 대신 시간으로 정하는 짧은 번개 섬광
+            val phase = time % 9f
+            if (phase < 0.09f || phase in 0.18f..0.24f) {
+                fill.color = Color.WHITE
+                fill.alpha = 120
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
+            }
+        }
+        fill.alpha = 255
+    }
+
+    private fun fract(value: Float): Float = value - floor(value)
+
+    /** 동서남북으로 놓인 사각형을 돌려서 그린다. 카메라 뒤로 넘어가는 부분은 잘라낸다. */
+    private fun drawGroundQuad(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float) {
+        quadRight[0] = toViewX(x0, y0); quadForward[0] = toViewY(x0, y0)
+        quadRight[1] = toViewX(x1, y0); quadForward[1] = toViewY(x1, y0)
+        quadRight[2] = toViewX(x1, y1); quadForward[2] = toViewY(x1, y1)
+        quadRight[3] = toViewX(x0, y1); quadForward[3] = toViewY(x0, y1)
+        val near = nearY
+        path.rewind()
+        pathStarted = false
+        for (i in 0 until 4) {
+            val next = (i + 1) % 4
+            val ax = quadRight[i]
+            val ay = quadForward[i]
+            val by = quadForward[next]
+            if (ay >= near) addGroundVertex(ax, ay)
+            if ((ay >= near) != (by >= near)) {
+                addGroundVertex(ax + (quadRight[next] - ax) * (near - ay) / (by - ay), near)
+            }
+        }
+        if (!pathStarted) return
+        path.close()
+        canvas.drawPath(path, fill)
+    }
+
+    private fun addGroundVertex(x: Float, y: Float) {
+        if (pathStarted) path.lineTo(screenX(x, y), screenY(y)) else path.moveTo(screenX(x, y), screenY(y))
+        pathStarted = true
+    }
+
+    private fun drawRangeRing(canvas: Canvas, look: Ambience, time: Float) {
+        if (reserveRadius <= 0) return
+        path.rewind()
+        for (i in 0..RING_SEGMENTS) {
+            val angle = i * 2 * Math.PI / RING_SEGMENTS
+            val x = (cos(angle) * reserveRadius).toFloat() - panRight
+            val y = max((sin(angle) * reserveRadius).toFloat() - panForward, nearY)
+            if (i == 0) path.moveTo(screenX(x, y), screenY(y)) else path.lineTo(screenX(x, y), screenY(y))
+        }
+        path.close()
+        fill.color = (look.range and 0x00FFFFFF) or (RANGE_FILL_ALPHA shl 24)
+        canvas.drawPath(path, fill)
+        stroke.color = look.range
+        stroke.alpha = (205 + 50 * sin(time * 2.5f)).toInt()
+        stroke.strokeWidth = 8f * unit
+        canvas.drawPath(path, stroke)
+    }
+
+    private fun drawStations(canvas: Canvas, position: GeoPoint, time: Float) {
+        markerHits.clear()
+        val placed = stations
+            .map { station ->
+                val (east, north) = station.position.metersFrom(position)
+                Triple(station, toViewX(east.toFloat(), north.toFloat()), toViewY(east.toFloat(), north.toFloat()))
+            }
+            .filter { (_, _, forward) -> forward - panForward > nearY }
+            .sortedByDescending { (_, _, forward) -> forward }
+
+        for ((station, right, forward) in placed) {
+            val x = right - panRight
+            val y = forward - panForward
+            val inRange = hypot(right, forward) <= reserveRadius
+            drawStation(canvas, station, screenX(x, y), screenY(y), depthScale(y), inRange, time)
+        }
+    }
+
+    private fun drawStation(
+        canvas: Canvas,
+        station: Station,
+        groundX: Float,
+        groundY: Float,
+        scale: Float,
+        inRange: Boolean,
+        time: Float,
+    ) {
+        val radius = MARKER_RADIUS * unit * scale
+        val hasFree = station.freeCount > 0
+        val mine = station.id == reservedStationId
+        val base = when {
+            mine -> MINE_COLOR
+            !inRange -> OUT_OF_RANGE_COLOR
+            hasFree -> FREE_COLOR
+            else -> BUSY_COLOR
+        }
+        val bob = if (inRange) sin(time * 3f + station.id.hashCode()) * radius * 0.12f else 0f
+        val markerY = groundY - radius * 2.6f + bob
+
+        // 바닥 그림자, 기둥
+        fill.color = Color.argb(90, 0, 0, 0)
+        oval.set(groundX - radius, groundY - radius * 0.32f, groundX + radius, groundY + radius * 0.32f)
+        canvas.drawOval(oval, fill)
+        stroke.color = base
+        stroke.strokeWidth = radius * 0.2f
+        canvas.drawLine(groundX, groundY, groundX, markerY, stroke)
+
+        // 예약 가능 거리 안의 충전소는 포켓스톱처럼 빛나며 회전한다.
+        if (inRange) {
+            stroke.color = base
+            stroke.alpha = 200
+            stroke.strokeWidth = radius * 0.1f
+            drawHexagon(canvas, groundX, markerY, radius * (1.3f + 0.08f * sin(time * 3f)), time * 0.8f, stroke)
+        }
+        fill.color = base
+        drawHexagon(canvas, groundX, markerY, radius, 0f, fill)
+        if (station.id == selectedId) {
+            stroke.color = Color.WHITE
+            stroke.alpha = 255
+            stroke.strokeWidth = radius * 0.13f
+            drawHexagon(canvas, groundX, markerY, radius * 1.1f, 0f, stroke)
+        }
+
+        // 충전 중 / 전체 대수
+        text.color = LABEL_DARK
+        text.textSize = radius * 0.72f
+        canvas.drawText("${station.chargingCount}/${station.total}", groundX, markerY + radius * 0.26f, text)
+
+        // 이름과 대기 시간
+        val labelY = markerY - radius * 1.5f
+        text.textSize = max(22f * unit, 30f * unit * scale)
+        text.color = Color.WHITE
+        // 밝은 낮이나 눈 쌓인 바닥에서도 읽히도록 글자 뒤에 어두운 판을 깐다.
+        val status = if (hasFree) "빈자리 ${station.freeCount}" else "${station.nextFreeMinutes}분 대기"
+        val labelHalf = max(text.measureText(station.name), text.measureText(status)) / 2 + text.textSize * 0.55f
+        fill.color = LABEL_PLATE_COLOR
+        canvas.drawRoundRect(
+            groundX - labelHalf, labelY - text.textSize * 2.25f,
+            groundX + labelHalf, labelY + text.textSize * 0.45f,
+            text.textSize * 0.5f, text.textSize * 0.5f, fill,
+        )
+        canvas.drawText(station.name, groundX, labelY - text.textSize * 1.15f, text)
+        text.color = if (hasFree) FREE_COLOR else BUSY_COLOR
+        canvas.drawText(status, groundX, labelY, text)
+
+        markerHits[station.id] = Triple(groundX, markerY, max(radius * 1.6f, MIN_HIT_RADIUS * unit))
+    }
+
+    private fun drawHexagon(canvas: Canvas, cx: Float, cy: Float, r: Float, rotation: Float, paint: Paint) {
+        path.rewind()
+        for (i in 0 until 6) {
+            val angle = rotation + i * Math.PI.toFloat() / 3f
+            val x = cx + r * sin(angle)
+            val y = cy - r * cos(angle)
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+        canvas.drawPath(path, paint)
+    }
+
+    private fun drawCar(canvas: Canvas, look: Ambience, time: Float) {
+        // 지도를 멀리 옮기면 차가 카메라 뒤로 넘어갈 수 있다.
+        if (-panForward <= nearY) return
+        val cx = screenX(-panRight, -panForward)
+        val cy = screenY(-panForward)
+        val scale = carScale * (CAMERA_BACK / (-panForward * zoom + CAMERA_BACK)).coerceIn(0.45f, 1f)
+        val pulse = (time * 0.7f) % 1f
+        val radius = (120f + pulse * 100f) * unit * scale
+        stroke.color = look.range
+        stroke.alpha = ((1 - pulse) * 220).toInt()
+        stroke.strokeWidth = 5f * unit
+        oval.set(cx - radius, cy - radius * 0.55f, cx + radius, cy + radius * 0.55f)
+        canvas.drawOval(oval, stroke)
+
+        if (look.headlights > 0.02f) drawHeadlightBeam(canvas, cx, cy, look.headlights, scale)
+        carModel.draw(canvas, cx, cy, CAR_PIXELS_PER_METER * unit * MAX_CAR_SCALE, CAR_PIXELS_PER_METER * unit * scale, screenHeading)
+    }
+
+    /** 화면에서 본 차의 방향. 카메라가 돈 만큼 반대로 돌아 보인다. */
+    private val screenHeading get() = ((heading - bearing) % 360f + 360f) % 360f
+
+    /** 차 앞쪽 바닥에 비치는 전조등 불빛. 바닥은 눌려 보이므로 세로만 줄인다. */
+    private fun drawHeadlightBeam(canvas: Canvas, cx: Float, cy: Float, strength: Float, scale: Float) {
+        val k = CAR_PIXELS_PER_METER * unit * scale
+        val radians = Math.toRadians(screenHeading.toDouble())
+        val sinH = sin(radians).toFloat()
+        val cosH = cos(radians).toFloat()
+        fun beamX(side: Float, ahead: Float) = cx + (side * cosH + ahead * sinH) * k
+        fun beamY(side: Float, ahead: Float) = cy - (-side * sinH + ahead * cosH) * GROUND_SQUASH * k
+        // 겹친 삼각형으로 멀어질수록 빛이 약해지는 모습을 낸다.
+        fill.color = HEADLIGHT_BEAM_COLOR
+        fill.alpha = (strength * 34).toInt()
+        for (reach in BEAM_REACHES) {
+            val spread = 0.7f + (reach - 2.2f) * 0.3f
+            path.rewind()
+            path.moveTo(beamX(-0.7f, 2.2f), beamY(-0.7f, 2.2f))
+            path.lineTo(beamX(0.7f, 2.2f), beamY(0.7f, 2.2f))
+            path.lineTo(beamX(spread, reach), beamY(spread, reach))
+            path.lineTo(beamX(-spread, reach), beamY(-spread, reach))
+            path.close()
+            canvas.drawPath(path, fill)
+        }
+        fill.alpha = 255
+    }
+
+    private fun screenX(x: Float, y: Float) = centerX + focal * x * zoom / (y * zoom + CAMERA_BACK)
+    private fun screenY(y: Float) = horizonY + focal * CAMERA_HEIGHT / (y * zoom + CAMERA_BACK)
+    private fun depthScale(y: Float) = (CAMERA_BACK / (y * zoom + CAMERA_BACK)).coerceIn(0.55f, 1.3f)
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                lastTouchX = event.x
+                lastTouchY = event.y
+                gestureHadMultipleFingers = false
+                dragging = false
+                panAnimator?.cancel()
+            }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                gestureHadMultipleFingers = true
+                if (event.pointerCount == 2) {
+                    lastTwistAngle = fingerAngle(event)
+                    twistTotal = 0f
+                    twisting = false
+                }
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (event.pointerCount >= 2) {
+                    twistBy(event)
+                } else if (!gestureHadMultipleFingers) {
+                    if (abs(event.x - downX) >= touchSlop || abs(event.y - downY) >= touchSlop) dragging = true
+                    if (dragging) {
+                        if (rotateMode) {
+                            // 손가락을 따라 앞쪽 풍경이 움직이도록 반대 방향으로 돈다.
+                            rotateBy(-(event.x - lastTouchX) / width * DEGREES_PER_MAP_WIDTH)
+                        } else {
+                            panBy(event.x - lastTouchX, event.y - lastTouchY)
+                        }
+                        lastTouchX = event.x
+                        lastTouchY = event.y
+                    }
+                }
+            }
+
+            MotionEvent.ACTION_UP -> {
+                val isTap = !gestureHadMultipleFingers && !dragging
+                if (isTap) {
+                    performClick()
+                    stationAt(event.x, event.y)?.let { onStationTapped?.invoke(it) }
+                }
+            }
+        }
+        return true
+    }
+
+    private fun fingerAngle(event: MotionEvent): Float = Math.toDegrees(
+        atan2((event.getY(1) - event.getY(0)).toDouble(), (event.getX(1) - event.getX(0)).toDouble()),
+    ).toFloat()
+
+    /** 두 손가락을 비틀면 돌린다. 핀치 중 생기는 작은 흔들림은 무시한다. */
+    private fun twistBy(event: MotionEvent) {
+        val angle = fingerAngle(event)
+        var delta = angle - lastTwistAngle
+        if (delta > 180f) delta -= 360f else if (delta < -180f) delta += 360f
+        lastTwistAngle = angle
+        if (!twisting) {
+            twistTotal += delta
+            if (abs(twistTotal) < TWIST_THRESHOLD_DEGREES) return
+            twisting = true
+        }
+        rotateBy(-delta)
+    }
+
+    /** 마우스 휠과 트랙패드 스크롤로도 내 차 기준으로 확대, 축소한다. */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked != MotionEvent.ACTION_SCROLL) return super.onGenericMotionEvent(event)
+        val amount = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+        if (amount == 0f) return false
+        setZoomDirectly(zoom * WHEEL_ZOOM_STEP.pow(amount))
+        return true
+    }
+
+    override fun performClick(): Boolean = super.performClick()
+
+    private fun stationAt(x: Float, y: Float): String? = markerHits.entries
+        .filter { (_, hit) -> hypot(x - hit.first, y - hit.second) <= hit.third }
+        .minByOrNull { (_, hit) -> hypot(x - hit.first, y - hit.second) }
+        ?.key
+
+    private companion object {
+        const val CAMERA_BACK = 3_000f
+        const val CAMERA_HEIGHT = 2_000f
+        const val NEAR_Y = -2_600f
+        const val VIEW_BACK = -2_600f
+        const val VIEW_FRONT = 16_000f
+        const val VIEW_SIDE = 12_000f
+        const val BLOCK = 500.0
+        const val ROAD_MARGIN = 26f
+        const val MINOR_ROAD = 13f
+        const val MAJOR_ROAD = 26f
+        const val RING_SEGMENTS = 96
+        const val MARKER_RADIUS = 62f
+        const val MIN_HIT_RADIUS = 76f
+        const val CAR_PIXELS_PER_METER = 56f
+        const val MAX_PAN = 5_000f
+        const val DEGREES_PER_MAP_WIDTH = 360f
+        const val TWIST_THRESHOLD_DEGREES = 8f
+        const val BEARING_RESET_MS = 320L
+        const val SKY_SCREENS_PER_TURN = 3f
+        const val RECENTER_ANIMATION_MS = 280L
+        const val ZOOM_STEP = 1.5f
+        const val WHEEL_ZOOM_STEP = 1.15f
+        const val ZOOM_ANIMATION_MS = 180L
+        const val MIN_ZOOM = 0.5f
+        const val MAX_ZOOM = 3f
+        const val MIN_CAR_SCALE = 0.75f
+        const val MAX_CAR_SCALE = 1.6f
+
+        const val RANGE_FILL_ALPHA = 44
+        const val STAR_COUNT = 70
+        const val CLOUD_COUNT = 9
+        const val RAIN_COUNT = 240
+        const val SNOW_COUNT = 170
+        const val GROUND_SQUASH = 0.555f
+        val BEAM_REACHES = floatArrayOf(4f, 5.5f, 7f)
+        val LABEL_PLATE_COLOR = Color.argb(170, 12, 18, 26)
+        val SUN_COLOR = Color.rgb(255, 224, 130)
+        val MOON_COLOR = Color.rgb(236, 240, 255)
+        val RAIN_COLOR = Color.rgb(205, 225, 245)
+        val HEADLIGHT_BEAM_COLOR = Color.rgb(255, 244, 190)
+        val FREE_COLOR = Color.rgb(61, 220, 151)
+        val BUSY_COLOR = Color.rgb(255, 179, 71)
+        val MINE_COLOR = Color.rgb(120, 228, 255)
+        val OUT_OF_RANGE_COLOR = Color.rgb(142, 158, 168)
+        val LABEL_DARK = Color.rgb(16, 24, 32)
+    }
+}
