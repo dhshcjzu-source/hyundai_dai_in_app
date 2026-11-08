@@ -19,6 +19,7 @@
             android:contentDescription="@string/map_description" />
 
         <LinearLayout
+            android:id="@+id/chips"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_margin="24dp"
@@ -29,6 +30,61 @@
             <TextView android:id="@+id/sourceChip" style="@style/Chip" />
             <TextView android:id="@+id/simChip" style="@style/Chip" />
         </LinearLayout>
+
+        <!-- 데모 주행 중 길 안내 -->
+        <LinearLayout
+            android:id="@+id/navBanner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="24dp"
+            android:background="@drawable/bg_nav"
+            android:gravity="center_vertical"
+            android:minWidth="460dp"
+            android:orientation="horizontal"
+            android:paddingHorizontal="28dp"
+            android:paddingVertical="20dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/navArrow"
+                android:layout_width="88dp"
+                android:layout_height="88dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_turn" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/navDistance"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/white"
+                    android:textSize="46sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/navInstruction"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxWidth="560dp"
+                    android:textColor="@color/white"
+                    android:textSize="28sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/navSummary"
+            style="@style/Chip"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="44dp"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
         <Button
             android:id="@+id/demoButton"

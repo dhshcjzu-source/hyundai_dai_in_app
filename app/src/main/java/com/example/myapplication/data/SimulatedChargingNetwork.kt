@@ -29,15 +29,26 @@ class SimulatedChargingNetwork(
         val eastMeters: Double,
         val total: Int,
         val occupied: Int,
+        /** 실시간 상태를 받을 때 맞춰 볼 충전기 ID. */
+        val chargerIds: List<String> = emptyList(),
+        /** 충전기별 남은 시간(초), null은 비어 있음. 목록이 없으면 앞쪽 [occupied]대에 임의 시간을 준다. */
+        val remainingSeconds: List<Int?>? = null,
     )
 
-    private class SimCharger(var remainingSeconds: Int?)
+    /** 실제 충전기 상태 한 건. [remainingSeconds]가 null이면 비어 있다. */
+    data class LiveUpdate(val stationId: String, val chargerId: String, val remainingSeconds: Int?)
+
+    private class SimCharger(var remainingSeconds: Int?) {
+        /** 내가 시작한 충전. 실시간 상태로 덮어쓰지 않는다. */
+        var mine = false
+    }
 
     private class SimStation(
         val id: String,
         val name: String,
         val position: GeoPoint,
         val chargers: List<SimCharger>,
+        val chargerIds: List<String>,
     )
 
     private class SimReservation(
@@ -52,8 +63,16 @@ class SimulatedChargingNetwork(
             name = plan.name,
             position = origin.offset(plan.northMeters, plan.eastMeters),
             chargers = List(plan.total) { index ->
-                SimCharger(if (index < plan.occupied) randomSession() else null)
+                val given = plan.remainingSeconds
+                SimCharger(
+                    when {
+                        given != null -> given.getOrNull(index)
+                        index < plan.occupied -> randomSession()
+                        else -> null
+                    },
+                )
             },
+            chargerIds = plan.chargerIds,
         )
     }
 
@@ -109,6 +128,7 @@ class SimulatedChargingNetwork(
         val charger = active.station.chargers[active.chargerIndex]
         if (charger.remainingSeconds != null) return StartChargingResult.ChargerBusy
         charger.remainingSeconds = MY_SESSION_SECONDS
+        charger.mine = true
         reservation = null
         return StartChargingResult.Started
     }
@@ -122,8 +142,10 @@ class SimulatedChargingNetwork(
             station.chargers.forEachIndexed { index, charger ->
                 val remaining = charger.remainingSeconds
                 when {
-                    remaining != null ->
+                    remaining != null -> {
                         charger.remainingSeconds = (remaining - seconds).takeIf { it > 0 }
+                        if (charger.remainingSeconds == null) charger.mine = false
+                    }
 
                     !isReserved(station, index) &&
                         random.nextDouble() < arrivalChancePerMinute * seconds / 60.0 ->
@@ -132,6 +154,24 @@ class SimulatedChargingNetwork(
             }
         }
         return advanceHold(seconds)
+    }
+
+    /**
+     * 실제 충전기 상태를 반영한다. 이미 충전 중으로 세고 있는 충전기는 남은 시간을 그대로 둔다.
+     */
+    fun applyLive(updates: List<LiveUpdate>) {
+        for (update in updates) {
+            val station = stations.firstOrNull { it.id == update.stationId } ?: continue
+            val index = station.chargerIds.indexOf(update.chargerId)
+            if (index < 0) continue
+            val charger = station.chargers[index]
+            if (charger.mine) continue
+            charger.remainingSeconds = when {
+                update.remainingSeconds == null -> null
+                charger.remainingSeconds != null -> charger.remainingSeconds
+                else -> update.remainingSeconds
+            }
+        }
     }
 
     /** 앞 차량이 충전 중일 때는 유지 시간이 줄지 않는다. */

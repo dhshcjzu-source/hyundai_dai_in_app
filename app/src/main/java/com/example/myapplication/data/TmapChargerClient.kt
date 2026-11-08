@@ -35,6 +35,34 @@ class TmapChargerClient(private val appKey: String) {
         }
     }
 
+    /** 위치의 10자리 법정동 코드. 백그라운드 스레드에서 부른다. 실패하면 null. */
+    fun regionCode(position: GeoPoint): String? = try {
+        val url = URL(
+            String.format(
+                Locale.US,
+                "https://apis.openapi.sk.com/tmap/geo/reversegeocoding?version=1&lat=%.6f&lon=%.6f" +
+                    "&coordType=WGS84GEO&addressType=A10",
+                position.latitude,
+                position.longitude,
+            ),
+        )
+        val connection = url.openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = TIMEOUT_MS
+            connection.readTimeout = TIMEOUT_MS
+            connection.setRequestProperty("appKey", appKey)
+            connection.setRequestProperty("Accept", "application/json")
+            check(connection.responseCode == 200) { "HTTP ${connection.responseCode}" }
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            JSONObject(body).getJSONObject("addressInfo").getString("legalDongCode").takeIf { it.length >= 5 }
+        } finally {
+            connection.disconnect()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "지역 코드 조회 실패", e)
+        null
+    }
+
     fun close() {
         executor.shutdownNow()
     }
@@ -72,8 +100,8 @@ class TmapChargerClient(private val appKey: String) {
             val poi = pois.getJSONObject(index)
             val chargers = poi.optJSONObject("evChargers")?.optJSONArray("evCharger") ?: return@mapNotNull null
             val statuses = (0 until chargers.length()).map { chargers.getJSONObject(it).optString("status") }
-            // 운영중지, 점검중인 충전기는 쓸 수 없으므로 뺀다.
-            val usable = statuses.filterNot { it == STATUS_STOPPED || it == STATUS_MAINTENANCE }
+            // 충전대기, 충전중만 센다. 운영중지, 점검중, 통신이상, 상태미확인은 빈자리인지 알 수 없다.
+            val usable = statuses.filter { it == STATUS_FREE || it == STATUS_CHARGING }
             if (usable.isEmpty()) return@mapNotNull null
             Candidate(
                 id = "tmap-" + poi.getString("id"),
@@ -91,6 +119,10 @@ class TmapChargerClient(private val appKey: String) {
         val position: GeoPoint,
         val total: Int,
         val charging: Int,
+        /** 실시간 상태를 이어 붙일 때 쓰는 충전기 ID. 없으면 비워 둔다. */
+        val chargerIds: List<String> = emptyList(),
+        /** 충전기별 남은 시간(초). null이면 비어 있음. 목록 자체가 없으면 시뮬레이터가 정한다. */
+        val remainingSeconds: List<Int?>? = null,
     )
 
     companion object {
@@ -102,9 +134,8 @@ class TmapChargerClient(private val appKey: String) {
         private const val MIN_SPACING_METERS = 800.0
 
         // 환경부 충전기 상태 코드
+        private const val STATUS_FREE = "2"
         private const val STATUS_CHARGING = "3"
-        private const val STATUS_STOPPED = "4"
-        private const val STATUS_MAINTENANCE = "5"
 
         /** "서울신문사급속 전기차충전소"처럼 모두 붙는 꼬리말을 떼어 화면에서 짧게 보이게 한다. */
         fun shortName(name: String): String =
@@ -123,7 +154,10 @@ class TmapChargerClient(private val appKey: String) {
             }
             return picked.map { candidate ->
                 val (east, north) = candidate.position.metersFrom(center)
-                StationPlan(candidate.id, candidate.name, north, east, candidate.total, candidate.charging)
+                StationPlan(
+                    candidate.id, candidate.name, north, east, candidate.total, candidate.charging,
+                    candidate.chargerIds, candidate.remainingSeconds,
+                )
             }
         }
     }

@@ -10,6 +10,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.content.res.ColorStateList
 import android.widget.Button
+import android.widget.ImageView
+import java.text.SimpleDateFormat
+import java.util.Locale
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -19,7 +22,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.myapplication.data.SimulatedChargingNetwork
+import com.example.myapplication.data.EvChargerClient
 import com.example.myapplication.data.TmapChargerClient
+import com.example.myapplication.data.TmapRouteClient
+import com.example.myapplication.nav.NavRoute
 import com.example.myapplication.data.WeatherClient
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.ARRIVAL_RADIUS_METERS
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.RESERVE_RADIUS_METERS
@@ -40,6 +46,9 @@ import com.example.myapplication.vehicle.VehicleGateway
 class MainActivity : AppCompatActivity() {
 
     private enum class PositionSource { DEFAULT, VEHICLE, DEMO }
+
+    /** 충전소 데이터를 어디서 받았는지. 실시간이면 현황을 실제 속도로 돌린다. */
+    private enum class StationSource { SIMULATED, TMAP, LIVE }
 
     private lateinit var map: GoMapView
     private lateinit var batteryChip: TextView
@@ -78,6 +87,22 @@ class MainActivity : AppCompatActivity() {
 
     private val weatherClient = WeatherClient()
     private val chargerClient = TmapChargerClient(BuildConfig.TMAP_APP_KEY)
+    private val evClient = EvChargerClient(BuildConfig.DATA_GO_KR_KEY)
+    private val routeClient = TmapRouteClient(BuildConfig.TMAP_APP_KEY)
+    private var stationSource = StationSource.SIMULATED
+    private var liveRegionCode: String? = null
+    private var liveStatusAt = 0L
+    private var liveStatusLoading = false
+
+    private var navRoute: NavRoute? = null
+    private var navProgress = 0.0
+    private var routeLoading = false
+    private lateinit var chips: View
+    private lateinit var navBanner: View
+    private lateinit var navArrow: ImageView
+    private lateinit var navDistance: TextView
+    private lateinit var navInstruction: TextView
+    private lateinit var navSummary: TextView
     private var stationsRequestedFor: GeoPoint? = null
     private var stationsLoading = false
     private lateinit var simChip: TextView
@@ -141,6 +166,8 @@ class MainActivity : AppCompatActivity() {
         gateway = null
         weatherClient.close()
         chargerClient.close()
+        evClient.close()
+        routeClient.close()
         super.onDestroy()
     }
 
@@ -168,6 +195,12 @@ class MainActivity : AppCompatActivity() {
 
         batteryChip.setText(R.string.battery_unknown)
         simChip = findViewById(R.id.simChip)
+        chips = findViewById(R.id.chips)
+        navBanner = findViewById(R.id.navBanner)
+        navArrow = findViewById(R.id.navArrow)
+        navDistance = findViewById(R.id.navDistance)
+        navInstruction = findViewById(R.id.navInstruction)
+        navSummary = findViewById(R.id.navSummary)
         simChip.text = getString(R.string.sim_badge, SIM_SPEED)
 
         map.onStationTapped = ::selectStation
@@ -232,36 +265,94 @@ class MainActivity : AppCompatActivity() {
         source = PositionSource.VEHICLE
     }
 
+    /**
+     * 선택한 충전소로, 선택이 없으면 가장 가까운 충전소로 가상 주행한다.
+     * TMAP 경로가 있으면 실제 도로를 따라가고, 없으면 직선으로 간다.
+     */
     private fun toggleDemo() {
-        demoDriving = !demoDriving
-        if (demoDriving) {
-            source = PositionSource.DEMO
-            // 움직이는 차를 볼 수 있도록 카메라를 차로 되돌린다.
-            map.recenter()
+        if (demoDriving || routeLoading) {
+            stopDemo()
+            return
         }
-        render()
-    }
-
-    /** 선택한 충전소로, 선택이 없으면 가장 가까운 충전소로 가상 주행한다. */
-    private fun driveDemo(elapsedMs: Long) {
         val stations = network.stations()
         val target = stations.firstOrNull { it.id == selectedStationId }
             ?: stations.minByOrNull { car.distanceTo(it.position) }
             ?: return
-        val distance = car.distanceTo(target.position)
-        if (distance <= DEMO_STOP_METERS) {
-            demoDriving = false
+        source = PositionSource.DEMO
+        // 움직이는 차를 볼 수 있도록 카메라를 차로 되돌린다.
+        map.recenter()
+        routeLoading = true
+        val start = car
+        routeClient.fetch(start, target.position) { route ->
+            if (!routeLoading) return@fetch
+            routeLoading = false
+            val next = route ?: NavRoute.straight(start, target.position)
+            navRoute = next
+            navProgress = 0.0
+            demoDriving = true
+            map.setRoute(next)
+            map.followHeading = true
+            map.zoomTo(NAV_ZOOM)
             render()
-            return
         }
-        heading = car.bearingTo(target.position)
-        val step = DEMO_SPEED_METERS_PER_SECOND * elapsedMs / 1000.0
-        car = car.moveToward(target.position, minOf(step, distance - DEMO_STOP_METERS / 2))
+        render()
+    }
+
+    private fun stopDemo(arrived: Boolean = false) {
+        demoDriving = false
+        routeLoading = false
+        navRoute = null
+        map.setRoute(null)
+        map.followHeading = false
+        if (arrived) toast(R.string.nav_arrived_toast)
+        render()
+    }
+
+    private fun driveDemo(elapsedMs: Long) {
+        val route = navRoute ?: return
+        navProgress = minOf(route.totalMeters, navProgress + NAV_SPEED_METERS_PER_SECOND * elapsedMs / 1000.0)
+        car = route.positionAt(navProgress)
+        heading = turnToward(heading, route.headingAt(navProgress), elapsedMs)
         map.setCar(car, heading)
+        map.setRouteProgress(navProgress)
+        renderNav(route)
+        if (navProgress >= route.totalMeters) stopDemo(arrived = true)
+    }
+
+    /** 굽은 길에서 차가 확 돌지 않도록 초당 [NAV_TURN_DEGREES_PER_SECOND]도까지만 돈다. */
+    private fun turnToward(current: Float, target: Float, elapsedMs: Long): Float {
+        var delta = target - current
+        while (delta > 180f) delta -= 360f
+        while (delta < -180f) delta += 360f
+        val limit = NAV_TURN_DEGREES_PER_SECOND * elapsedMs / 1000f
+        return ((current + delta.coerceIn(-limit, limit)) % 360f + 360f) % 360f
+    }
+
+    private fun renderNav(route: NavRoute) {
+        val next = route.nextGuidance(navProgress)
+        if (next != null) {
+            setIfChanged(navDistance, formatDistance(next.distance - navProgress))
+            val instruction = if (next.road.isEmpty()) next.instruction else "${next.instruction} · ${next.road}"
+            setIfChanged(navInstruction, instruction)
+            navArrow.rotation = next.turnDegrees.coerceIn(-150f, 150f)
+            navArrow.setImageResource(if (next.arrival) R.drawable.ic_flag else R.drawable.ic_turn)
+        }
+        val remainingMeters = route.totalMeters - navProgress
+        val remainingSeconds = if (route.totalMeters > 0) route.totalSeconds * remainingMeters / route.totalMeters else 0.0
+        val arrival = SimpleDateFormat("HH:mm", Locale.KOREA).format(System.currentTimeMillis() + (remainingSeconds * 1000).toLong())
+        setIfChanged(
+            navSummary,
+            getString(R.string.nav_summary, arrival, formatDistance(remainingMeters), maxOf(1, (remainingSeconds / 60).toInt())),
+        )
+    }
+
+    private fun setIfChanged(view: TextView, text: String) {
+        if (view.text.toString() != text) view.text = text
     }
 
     private fun advanceSimulation(elapsedMs: Long) {
-        simSecondCarry += elapsedMs * SIM_SPEED
+        // 실시간 현황은 실제 시간대로, 시뮬레이션은 빠르게 돌린다.
+        simSecondCarry += elapsedMs * if (stationSource == StationSource.LIVE) 1 else SIM_SPEED
         val seconds = (simSecondCarry / 1000).toInt()
         if (seconds == 0) return
         simSecondCarry -= seconds * 1000L
@@ -311,12 +402,50 @@ class MainActivity : AppCompatActivity() {
         stationsLoading = true
         stationsRequestedFor = car
         val center = car
+        if (!evClient.isConfigured) {
+            fetchTmapStations(center)
+            return
+        }
+        // 공공데이터(환경부)를 먼저 쓰고, 실패하면 TMAP으로 넘어간다.
+        evClient.fetchStations(center, { chargerClient.regionCode(center) }) { result ->
+            if (result == null) {
+                fetchTmapStations(center)
+                return@fetchStations
+            }
+            stationsLoading = false
+            if (network.reservation() != null) return@fetchStations
+            network = SimulatedChargingNetwork(center, result.plans, arrivalChancePerMinute = 0.0)
+            stationSource = StationSource.LIVE
+            liveRegionCode = result.regionCode
+            liveStatusAt = SystemClock.elapsedRealtime()
+            simChip.setText(R.string.sim_badge_live)
+            render()
+        }
+    }
+
+    private fun fetchTmapStations(center: GeoPoint) {
         chargerClient.fetch(center) { plans ->
             stationsLoading = false
             if (plans == null || network.reservation() != null) return@fetch
             network = SimulatedChargingNetwork(center, plans)
+            stationSource = StationSource.TMAP
             simChip.text = getString(R.string.sim_badge_tmap, SIM_SPEED)
             render()
+        }
+    }
+
+    /** 실시간 모드에서 1분마다 바뀐 충전기 상태를 받아 반영한다. */
+    private fun refreshLiveStatus(now: Long) {
+        val region = liveRegionCode ?: return
+        if (stationSource != StationSource.LIVE || liveStatusLoading || now - liveStatusAt < LIVE_STATUS_INTERVAL_MS) return
+        liveStatusLoading = true
+        liveStatusAt = now
+        evClient.fetchStatus(region) { updates ->
+            liveStatusLoading = false
+            if (updates != null && stationSource == StationSource.LIVE) {
+                network.applyLive(updates)
+                render()
+            }
         }
     }
 
@@ -372,6 +501,7 @@ class MainActivity : AppCompatActivity() {
         lastPanelAt = SystemClock.elapsedRealtime()
         refreshWeather(lastPanelAt)
         refreshStations()
+        refreshLiveStatus(lastPanelAt)
         renderAmbience()
         val stations = network.stations()
         val reservation = network.reservation()
@@ -385,7 +515,18 @@ class MainActivity : AppCompatActivity() {
                 PositionSource.DEMO -> R.string.source_demo
             },
         )
-        demoButton.setText(if (demoDriving) R.string.demo_stop else R.string.demo_start)
+        demoButton.setText(
+            when {
+                routeLoading -> R.string.route_searching
+                demoDriving -> R.string.demo_stop
+                else -> R.string.demo_start
+            },
+        )
+        val navigating = demoDriving && navRoute != null
+        navBanner.visibility = if (navigating) View.VISIBLE else View.GONE
+        navSummary.visibility = if (navigating) View.VISIBLE else View.GONE
+        chips.visibility = if (navigating) View.GONE else View.VISIBLE
+        navRoute?.let { if (navigating) renderNav(it) }
 
         renderReservation(reservation, stations)
         val selected = stations.firstOrNull { it.id == selectedStationId }
@@ -536,8 +677,11 @@ class MainActivity : AppCompatActivity() {
         const val SIM_SPEED = 6
         const val TICK_MS = 100L
         const val PANEL_INTERVAL_MS = 1_000L
-        const val DEMO_SPEED_METERS_PER_SECOND = 120.0
-        const val DEMO_STOP_METERS = 40.0
+        /** 데모 주행 속도. 실제보다 빠르게(시속 약 110km) 움직여 시연 시간을 줄인다. */
+        const val NAV_SPEED_METERS_PER_SECOND = 30.0
+        const val NAV_TURN_DEGREES_PER_SECOND = 220f
+        const val NAV_ZOOM = 1.6f
+        const val LIVE_STATUS_INTERVAL_MS = 60_000L
         const val MIN_HEADING_MOVE_METERS = 3.0
 
         /** 이만큼 움직이면 주변 충전소를 다시 받는다. 검색 반경(5km)보다 작게 잡는다. */

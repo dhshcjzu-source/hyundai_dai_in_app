@@ -149,4 +149,26 @@ class SimulatedChargingNetworkTest {
         val station = network.station("full")
         assertEquals(StartChargingResult.ChargerBusy, network.startCharging(station.position))
     }
+
+    @Test
+    fun `live plans use given remaining times and apply status updates`() {
+        val live = StationPlan(
+            "ev-1", "실시간", 0.0, 300.0, total = 2, occupied = 1,
+            chargerIds = listOf("01", "02"), remainingSeconds = listOf(600, null),
+        )
+        val network = SimulatedChargingNetwork(origin, listOf(live), Random(1), arrivalChancePerMinute = 0.0)
+        assertEquals(10, network.station("ev-1").chargers[0].remainingMinutes)
+        assertFalse(network.station("ev-1").chargers[1].isCharging)
+
+        network.applyLive(
+            listOf(
+                SimulatedChargingNetwork.LiveUpdate("ev-1", "01", null),
+                SimulatedChargingNetwork.LiveUpdate("ev-1", "02", 1_200),
+                SimulatedChargingNetwork.LiveUpdate("ev-1", "99", 60),
+                SimulatedChargingNetwork.LiveUpdate("other", "01", 60),
+            ),
+        )
+        assertFalse(network.station("ev-1").chargers[0].isCharging)
+        assertEquals(20, network.station("ev-1").chargers[1].remainingMinutes)
+    }
 }

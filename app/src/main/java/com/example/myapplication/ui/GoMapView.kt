@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -17,6 +18,7 @@ import android.view.ViewConfiguration
 import com.example.myapplication.model.Ambience
 import com.example.myapplication.model.GeoPoint
 import com.example.myapplication.model.Station
+import com.example.myapplication.nav.NavRoute
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -87,6 +89,13 @@ class GoMapView @JvmOverloads constructor(
     /** 켜면 한 손가락으로 끌 때 지도를 옮기는 대신 내 차를 중심으로 돌린다. */
     var rotateMode = false
 
+    /** 켜면 카메라가 차의 진행 방향을 따라 돈다. 손으로 돌리면 꺼진다. */
+    var followHeading = false
+    private var lastFrameAt = 0L
+
+    private var route: NavRoute? = null
+    private var routeProgress = 0.0
+
     /** [bearing]이 바뀔 때 호출된다. */
     var onBearingChanged: (() -> Unit)? = null
 
@@ -139,6 +148,7 @@ class GoMapView @JvmOverloads constructor(
 
     /** 카메라를 북쪽 방향으로 되돌린다. 더 가까운 쪽으로 돈다. */
     fun resetBearing() {
+        followHeading = false
         bearingAnimator?.cancel()
         val start = if (bearing > 180f) bearing - 360f else bearing
         if (start == 0f) return
@@ -150,6 +160,7 @@ class GoMapView @JvmOverloads constructor(
     }
 
     private fun rotateBy(degrees: Float) {
+        followHeading = false
         bearingAnimator?.cancel()
         applyBearing(bearing + degrees)
     }
@@ -167,6 +178,19 @@ class GoMapView @JvmOverloads constructor(
     private fun toViewY(east: Float, north: Float) = east * bearingSin + north * bearingCos
     private fun toEast(right: Float, forward: Float) = right * bearingCos + forward * bearingSin
     private fun toNorth(right: Float, forward: Float) = -right * bearingSin + forward * bearingCos
+
+    fun zoomTo(value: Float) = animateZoomTo(value)
+
+    /** 그릴 주행 경로. null이면 지운다. */
+    fun setRoute(next: NavRoute?) {
+        route = next
+        routeProgress = 0.0
+    }
+
+    /** 출발점부터 지금까지 경로를 따라 간 거리(미터). 지난 길은 흐리게 그린다. */
+    fun setRouteProgress(meters: Double) {
+        routeProgress = meters
+    }
 
     fun zoomIn() = animateZoomTo(zoomTarget * ZOOM_STEP)
 
@@ -282,7 +306,9 @@ class GoMapView @JvmOverloads constructor(
         val time = (System.currentTimeMillis() % 86_400_000L) / 1000f
         canvas.drawColor(look.ground)
         drawBackground(canvas, position, look, time)
+        followCarHeading()
         drawRangeRing(canvas, look, time)
+        drawRoute(canvas, position)
         drawStations(canvas, position, time)
         drawCar(canvas, look, time)
         drawPrecipitation(canvas, look, time)
@@ -497,6 +523,75 @@ class GoMapView @JvmOverloads constructor(
         stroke.alpha = (205 + 50 * sin(time * 2.5f)).toInt()
         stroke.strokeWidth = 8f * unit
         canvas.drawPath(path, stroke)
+    }
+
+    /** 진행 방향이 화면 위쪽이 되도록 카메라를 부드럽게 돌린다. */
+    private fun followCarHeading() {
+        val now = SystemClock.uptimeMillis()
+        val seconds = ((now - lastFrameAt).coerceIn(0L, 100L)) / 1000f
+        lastFrameAt = now
+        if (!followHeading) return
+        var delta = heading - bearing
+        while (delta > 180f) delta -= 360f
+        while (delta < -180f) delta += 360f
+        if (abs(delta) < 0.05f) return
+        applyBearing(bearing + delta * min(1f, seconds * FOLLOW_RATE))
+    }
+
+    private fun drawRoute(canvas: Canvas, position: GeoPoint) {
+        val path = route ?: return
+        val points = path.points
+        val split = path.positionAt(routeProgress)
+        for (outline in booleanArrayOf(true, false)) {
+            for (i in 0 until points.size - 1) {
+                val start = path.cumulative[i]
+                val end = path.cumulative[i + 1]
+                when {
+                    end <= routeProgress -> if (!outline) drawRouteSegment(canvas, position, points[i], points[i + 1], true, false)
+                    start >= routeProgress -> drawRouteSegment(canvas, position, points[i], points[i + 1], false, outline)
+                    else -> {
+                        if (!outline) drawRouteSegment(canvas, position, points[i], split, true, false)
+                        drawRouteSegment(canvas, position, split, points[i + 1], false, outline)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 경로 한 구간을 바닥에 그린다. 멀수록 가늘어지고 카메라 뒤쪽은 잘라낸다. */
+    private fun drawRouteSegment(
+        canvas: Canvas,
+        position: GeoPoint,
+        from: GeoPoint,
+        to: GeoPoint,
+        traveled: Boolean,
+        outline: Boolean,
+    ) {
+        val (fromEast, fromNorth) = from.metersFrom(position)
+        val (toEast, toNorth) = to.metersFrom(position)
+        var ax = toViewX(fromEast.toFloat(), fromNorth.toFloat()) - panRight
+        var ay = toViewY(fromEast.toFloat(), fromNorth.toFloat()) - panForward
+        var bx = toViewX(toEast.toFloat(), toNorth.toFloat()) - panRight
+        var by = toViewY(toEast.toFloat(), toNorth.toFloat()) - panForward
+        val near = nearY
+        if (ay < near && by < near) return
+        if (ay < near) {
+            ax += (bx - ax) * (near - ay) / (by - ay)
+            ay = near
+        } else if (by < near) {
+            bx += (ax - bx) * (near - by) / (ay - by)
+            by = near
+        }
+        val width = ROUTE_WIDTH * unit * depthScale((ay + by) / 2) * sqrt(zoom)
+        stroke.strokeCap = Paint.Cap.ROUND
+        stroke.strokeWidth = if (outline) width * 1.5f else width
+        stroke.color = when {
+            outline -> ROUTE_OUTLINE_COLOR
+            traveled -> ROUTE_TRAVELED_COLOR
+            else -> ROUTE_COLOR
+        }
+        canvas.drawLine(screenX(ax, ay), screenY(ay), screenX(bx, by), screenY(by), stroke)
+        stroke.strokeCap = Paint.Cap.BUTT
     }
 
     private fun drawStations(canvas: Canvas, position: GeoPoint, time: Float) {
@@ -753,6 +848,11 @@ class GoMapView @JvmOverloads constructor(
         const val TWIST_THRESHOLD_DEGREES = 8f
         const val BEARING_RESET_MS = 320L
         const val SKY_SCREENS_PER_TURN = 3f
+        const val FOLLOW_RATE = 4f
+        const val ROUTE_WIDTH = 22f
+        val ROUTE_COLOR = Color.rgb(66, 153, 255)
+        val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
+        val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
         const val RECENTER_ANIMATION_MS = 280L
         const val ZOOM_STEP = 1.5f
         const val WHEEL_ZOOM_STEP = 1.15f

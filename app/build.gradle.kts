@@ -24,6 +24,8 @@ android {
             rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
         }
         buildConfigField("String", "TMAP_APP_KEY", "\"${localProperties.getProperty("tmap.appKey", "")}\"")
+        // 공공데이터포털 한국환경공단 전기자동차 충전소 정보 서비스 키
+        buildConfigField("String", "DATA_GO_KR_KEY", "\"${localProperties.getProperty("datagokr.serviceKey", "")}\"")
     }
 
     buildTypes {
@@ -50,6 +52,8 @@ dependencies {
     implementation(libs.pleos.vehicle)
     implementation(libs.pleos.fused.location)
     testImplementation(libs.junit)
+    // 단위 테스트에서 실제 JSON 파서를 쓴다. (안드로이드 기본 org.json은 JVM 테스트에서 동작하지 않는다)
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
 }
