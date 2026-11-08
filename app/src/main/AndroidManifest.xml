@@ -5,6 +5,10 @@
     <!-- 실시간 날씨 조회 -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- 현재 위치 GPS 수신 -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <!-- Pleos Connect: 배터리 잔량, 차량 위치 -->
     <uses-permission android:name="pleos.car.permission.CAR_ENERGY" />
     <uses-permission android:name="pleos.car.permission.FUSED_LOCATION" />

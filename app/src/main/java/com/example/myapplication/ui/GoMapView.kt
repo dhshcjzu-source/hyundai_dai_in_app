@@ -30,6 +30,7 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -69,20 +70,24 @@ class GoMapView @JvmOverloads constructor(
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
-    /** 지도 확대 배율. 1이 기본이고 두 손가락으로 조절한다. */
-    var zoom = 1f
+    /** 기본 상태(0단계) 기준 확대/축소 단계 (-3..+5). 줌인은 최대 5번, 줌아웃은 최대 3번 가능하다. */
+    var zoomStep = 0
+        private set
+
+    /** 지도 확대 배율. [DEFAULT_ZOOM]이 기본이고 두 손가락으로 조절한다. */
+    var zoom = DEFAULT_ZOOM
         private set
 
     /** 애니메이션이 끝났을 때의 배율. 연속으로 눌러도 단계가 누적된다. */
-    private var zoomTarget = 1f
+    private var zoomTarget = DEFAULT_ZOOM
     private var zoomAnimator: ValueAnimator? = null
 
     /** 확대, 축소 가능 여부가 바뀔 수 있을 때 호출된다. */
     var onZoomLimitsChanged: (() -> Unit)? = null
     /** 애니메이션이 끝났을 때의 배율. */
     val zoomGoal get() = zoomTarget
-    val canZoomIn get() = zoomTarget < MAX_ZOOM
-    val canZoomOut get() = zoomTarget > MIN_ZOOM
+    val canZoomIn get() = zoomStep < MAX_ZOOM_STEPS
+    val canZoomOut get() = zoomStep > -MAX_ZOOM_OUT_STEPS
 
     /** 카메라가 바라보는 방위각(북=0, 동=90). 항상 내 차를 축으로 돈다. */
     var bearing = 0f
@@ -138,18 +143,40 @@ class GoMapView @JvmOverloads constructor(
 
     /** 이번 터치에 두 손가락이 닿았으면 손을 뗄 때 충전소 선택으로 처리하지 않는다. */
     private var gestureHadMultipleFingers = false
+    private var pinchStartStep = 0
+    private var pinchScale = 1f
     private val scaleDetector = ScaleGestureDetector(
         context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                setZoomDirectly(zoom * detector.scaleFactor)
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                pinchStartStep = zoomStep
+                pinchScale = 1f
+                zoomAnimator?.cancel()
                 return true
+            }
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                pinchScale *= detector.scaleFactor
+                val minStepZoom = zoomForStep(pinchStartStep - 1)
+                val maxStepZoom = zoomForStep(pinchStartStep + 1)
+                val baseZoom = zoomForStep(pinchStartStep)
+                applyZoom((baseZoom * pinchScale).coerceIn(minStepZoom, maxStepZoom))
+                zoomTarget = zoom
+                return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                val nextStep = when {
+                    pinchScale >= PINCH_STEP_THRESHOLD -> (pinchStartStep + 1).coerceAtMost(MAX_ZOOM_STEPS)
+                    pinchScale <= 1f / PINCH_STEP_THRESHOLD -> (pinchStartStep - 1).coerceAtLeast(-MAX_ZOOM_OUT_STEPS)
+                    else -> pinchStartStep
+                }
+                setZoomStep(nextStep, animate = false)
             }
         },
     ).apply { isQuickScaleEnabled = false }
 
     private val nearY get() = NEAR_Y / zoom
-    private val carScale get() = sqrt(zoom).coerceIn(MIN_CAR_SCALE, MAX_CAR_SCALE)
 
     private var fadeShader: Shader? = null
     private var skyShader: Shader? = null
@@ -194,10 +221,10 @@ class GoMapView @JvmOverloads constructor(
     private fun toEast(right: Float, forward: Float) = right * bearingCos + forward * bearingSin
     private fun toNorth(right: Float, forward: Float) = -right * bearingSin + forward * bearingCos
 
-    fun zoomTo(value: Float) = animateZoomTo(value)
+    fun zoomTo(value: Float) = setZoomStep(stepForZoom(value), animate = true)
 
     /** 애니메이션 없이 바로 배율을 바꾼다. */
-    fun setZoomNow(value: Float) = setZoomDirectly(value)
+    fun setZoomNow(value: Float) = setZoomStep(stepForZoom(value), animate = false)
 
     /**
      * 멀리서 볼 때만 도로 폭과 건물 높이를 키운다. 가까이 볼수록 실제 크기로 돌아간다.
@@ -229,9 +256,25 @@ class GoMapView @JvmOverloads constructor(
         routeProgress = meters
     }
 
-    fun zoomIn() = animateZoomTo(zoomTarget * ZOOM_STEP)
+    fun zoomIn() {
+        if (!canZoomIn) return
+        setZoomStep(zoomStep + 1, animate = true)
+    }
 
-    fun zoomOut() = animateZoomTo(zoomTarget / ZOOM_STEP)
+    fun zoomOut() {
+        if (!canZoomOut) return
+        setZoomStep(zoomStep - 1, animate = true)
+    }
+
+    private fun setZoomStep(step: Int, animate: Boolean) {
+        zoomStep = step.coerceIn(-MAX_ZOOM_OUT_STEPS, MAX_ZOOM_STEPS)
+        val target = zoomForStep(zoomStep)
+        if (animate) {
+            animateZoomTo(target)
+        } else {
+            setZoomDirectly(target)
+        }
+    }
 
     private fun setZoomDirectly(value: Float) {
         zoomAnimator?.cancel()
@@ -293,7 +336,7 @@ class GoMapView @JvmOverloads constructor(
     }
 
     fun setCar(position: GeoPoint, headingDegrees: Float) {
-        if (origin == null) origin = position
+        if (origin == null || position.distanceTo(origin!!) > ORIGIN_RESET_METERS) origin = position
         car = position
         heading = headingDegrees
     }
@@ -427,7 +470,6 @@ class GoMapView @JvmOverloads constructor(
             fillGroundPolygon(canvas, toView(area.east, area.north, east, north))
         }
         stroke.strokeCap = Paint.Cap.ROUND
-        val roadScale = 1f + (ROAD_WIDTH_SCALE - 1f) * exaggeration
         for (road in real.roads) {
             stroke.color = if (road.major) look.majorRoad else look.minorRoad
             val count = toView(road.east, road.north, east, north)
@@ -955,12 +997,30 @@ class GoMapView @JvmOverloads constructor(
         canvas.drawPath(path, paint)
     }
 
+    /** 지금 배율에서 도로 폭에 곱하는 과장 배율. 멀리 볼수록 도로를 넓게 그린다. */
+    private val roadScale get() = 1f + (ROAD_WIDTH_SCALE - 1f) * exaggeration
+
+    /**
+     * 내 차량의 화면상 1미터당 픽셀 수.
+     * 차 위치에서 그려지는 주요 도로(폭 [REFERENCE_ROAD_METERS]) 폭보다 [CAR_OVER_ROAD]배 넓게 보이도록 맞춘다.
+     * 도로와 같은 방식으로 계산하므로 확대/축소해도 도로 대비 크기가 유지된다.
+     */
+    private val carPixelsPerMeter: Float
+        get() {
+            val roadPixels = REFERENCE_ROAD_METERS * roadScale * pixelsPerMeter(max(-panForward, nearY / 2))
+            return roadPixels * CAR_OVER_ROAD / CAR_WIDTH_METERS
+        }
+
+    /** 내 차량의 렌더링 배율. 예전 고정 크기(1f) 대비 비율이다. */
+    val carRenderScale: Float get() = carPixelsPerMeter / (CAR_PIXELS_PER_METER * unit)
+
     private fun drawCar(canvas: Canvas, look: Ambience, time: Float) {
         // 지도를 멀리 옮기면 차가 카메라 뒤로 넘어갈 수 있다.
         if (-panForward <= nearY) return
         val cx = screenX(-panRight, -panForward)
         val cy = screenY(-panForward)
-        val scale = carScale * (CAMERA_BACK / (-panForward * zoom + CAMERA_BACK)).coerceIn(0.45f, 1f)
+        // 차 크기는 주변 도로 폭보다 조금 크게, 확대/축소에 맞춰 함께 바뀐다.
+        val scale = carRenderScale
         val pulse = (time * 0.7f) % 1f
         val radius = (120f + pulse * 100f) * unit * scale
         stroke.color = look.range
@@ -969,16 +1029,17 @@ class GoMapView @JvmOverloads constructor(
         oval.set(cx - radius, cy - radius * 0.55f, cx + radius, cy + radius * 0.55f)
         canvas.drawOval(oval, stroke)
 
-        if (look.headlights > 0.02f) drawHeadlightBeam(canvas, cx, cy, look.headlights, scale)
-        carModel.draw(canvas, cx, cy, CAR_PIXELS_PER_METER * unit * MAX_CAR_SCALE, CAR_PIXELS_PER_METER * unit * scale, screenHeading)
+        if (look.headlights > 0.02f) drawHeadlightBeam(canvas, cx, cy, look.headlights)
+        val k = carPixelsPerMeter
+        carModel.draw(canvas, cx, cy, k, k, screenHeading)
     }
 
     /** 화면에서 본 차의 방향. 카메라가 돈 만큼 반대로 돌아 보인다. */
     private val screenHeading get() = ((heading - bearing) % 360f + 360f) % 360f
 
     /** 차 앞쪽 바닥에 비치는 전조등 불빛. 바닥은 눌려 보이므로 세로만 줄인다. */
-    private fun drawHeadlightBeam(canvas: Canvas, cx: Float, cy: Float, strength: Float, scale: Float) {
-        val k = CAR_PIXELS_PER_METER * unit * scale
+    private fun drawHeadlightBeam(canvas: Canvas, cx: Float, cy: Float, strength: Float) {
+        val k = carPixelsPerMeter
         val radians = Math.toRadians(screenHeading.toDouble())
         val sinH = sin(radians).toFloat()
         val cosH = cos(radians).toFloat()
@@ -1081,7 +1142,7 @@ class GoMapView @JvmOverloads constructor(
         if (event.actionMasked != MotionEvent.ACTION_SCROLL) return super.onGenericMotionEvent(event)
         val amount = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
         if (amount == 0f) return false
-        setZoomDirectly(zoom * WHEEL_ZOOM_STEP.pow(amount))
+        if (amount > 0f) zoomIn() else zoomOut()
         return true
     }
 
@@ -1092,59 +1153,77 @@ class GoMapView @JvmOverloads constructor(
         .minByOrNull { (_, hit) -> hypot(x - hit.first, y - hit.second) }
         ?.key
 
-    private companion object {
-        const val CAMERA_BACK = 3_000f
-        const val CAMERA_HEIGHT = 2_000f
-        const val NEAR_Y = -2_600f
-        const val VIEW_BACK = -2_600f
-        const val VIEW_FRONT = 16_000f
-        const val VIEW_SIDE = 12_000f
-        const val BLOCK = 500.0
-        const val ROAD_MARGIN = 26f
-        const val MINOR_ROAD = 13f
-        const val MAJOR_ROAD = 26f
-        const val RING_SEGMENTS = 96
-        const val MARKER_RADIUS = 62f
-        const val MIN_HIT_RADIUS = 76f
-        const val CAR_PIXELS_PER_METER = 56f
-        const val MAX_PAN = 5_000f
-        const val DEGREES_PER_MAP_WIDTH = 360f
-        const val TWIST_THRESHOLD_DEGREES = 8f
-        const val BEARING_RESET_MS = 320L
-        const val SKY_SCREENS_PER_TURN = 3f
-        const val FOLLOW_RATE = 4f
-        const val ROAD_WIDTH_SCALE = 3f
-        const val TRUE_SCALE_ZOOM = 40f
-        const val HORIZON_MARGIN = 110f
-        const val FULL_EXAGGERATION_ZOOM = 2f
-        const val ROUTE_METERS = 4f
-        const val BUILDING_FAR_METERS = 2_500f
-        const val BUILDING_HEIGHT_SCALE = 4f
-        const val FACILITY_RADIUS = 20f
-        const val FACILITY_LABEL_METERS = 350.0
-        const val LIGHT_X = -0.6f
-        const val LIGHT_Y = -0.8f
-        val WATER_COLOR = Color.rgb(64, 140, 210)
-        val PITCH_COLOR = Color.rgb(200, 120, 90)
-        val WALL_COLOR = Color.rgb(196, 202, 212)
-        val ROOF_COLOR = Color.rgb(232, 235, 240)
-        val FACILITY_COLORS = mapOf(
+    companion object {
+        private const val CAMERA_BACK = 3_000f
+        private const val CAMERA_HEIGHT = 2_000f
+        private const val NEAR_Y = -2_600f
+        private const val VIEW_BACK = -2_600f
+        private const val VIEW_FRONT = 16_000f
+        private const val VIEW_SIDE = 12_000f
+        private const val BLOCK = 500.0
+        private const val ROAD_MARGIN = 26f
+        private const val MINOR_ROAD = 13f
+        private const val MAJOR_ROAD = 26f
+        private const val RING_SEGMENTS = 96
+        private const val MARKER_RADIUS = 62f
+        private const val MIN_HIT_RADIUS = 76f
+        private const val CAR_PIXELS_PER_METER = 56f
+        /** 차 크기의 기준이 되는 도로 폭(미터). OSM primary 도로 폭과 같다. */
+        private const val REFERENCE_ROAD_METERS = 16f
+        /** 차 폭을 기준 도로 폭보다 이만큼 크게 그린다. */
+        private const val CAR_OVER_ROAD = 1.2f
+        /** 차 모델의 실제 폭(미터). CarModel의 최대 반폭 0.955 × 2. */
+        private const val CAR_WIDTH_METERS = 1.91f
+        private const val MAX_PAN = 5_000f
+        private const val ORIGIN_RESET_METERS = 10_000.0
+        private const val DEGREES_PER_MAP_WIDTH = 360f
+        private const val TWIST_THRESHOLD_DEGREES = 8f
+        private const val BEARING_RESET_MS = 320L
+        private const val SKY_SCREENS_PER_TURN = 3f
+        private const val FOLLOW_RATE = 4f
+        private const val ROAD_WIDTH_SCALE = 3f
+        private const val TRUE_SCALE_ZOOM = 40f
+        private const val HORIZON_MARGIN = 110f
+        private const val FULL_EXAGGERATION_ZOOM = 2f
+        private const val ROUTE_METERS = 4f
+        private const val BUILDING_FAR_METERS = 2_500f
+        private const val BUILDING_HEIGHT_SCALE = 4f
+        private const val FACILITY_RADIUS = 20f
+        private const val FACILITY_LABEL_METERS = 350.0
+        private const val LIGHT_X = -0.6f
+        private const val LIGHT_Y = -0.8f
+        private val WATER_COLOR = Color.rgb(64, 140, 210)
+        private val PITCH_COLOR = Color.rgb(200, 120, 90)
+        private val WALL_COLOR = Color.rgb(196, 202, 212)
+        private val ROOF_COLOR = Color.rgb(232, 235, 240)
+        private val FACILITY_COLORS = mapOf(
             Facility.Kind.CONVENIENCE to Color.rgb(255, 128, 64),
             Facility.Kind.CAFE to Color.rgb(160, 104, 70),
             Facility.Kind.FOOD to Color.rgb(232, 84, 112),
         )
-        const val ROUTE_WIDTH = 22f
-        val ROUTE_COLOR = Color.rgb(66, 153, 255)
-        val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
-        val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
-        const val RECENTER_ANIMATION_MS = 280L
-        const val ZOOM_STEP = 2f
-        const val WHEEL_ZOOM_STEP = 1.15f
-        const val ZOOM_ANIMATION_MS = 180L
-        const val MIN_ZOOM = 0.5f
-        const val MAX_ZOOM = 120f
-        const val MIN_CAR_SCALE = 0.75f
-        const val MAX_CAR_SCALE = 1.6f
+        private const val ROUTE_WIDTH = 22f
+        private val ROUTE_COLOR = Color.rgb(66, 153, 255)
+        private val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
+        private val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
+        private const val RECENTER_ANIMATION_MS = 280L
+        /** 기본 상태(0단계)에서 핀치줌/핀치아웃 각각 최대 5번씩만 가능하도록 제한한다. */
+        const val MAX_ZOOM_STEPS = 5
+        /** 기본 상태(0단계)에서 줌아웃은 최대 3번까지만 가능하다. */
+        const val MAX_ZOOM_OUT_STEPS = 3
+        const val DEFAULT_ZOOM = 8f
+        const val ZOOM_STEP = 1.6f
+        private const val PINCH_STEP_THRESHOLD = 1.05f
+        private const val ZOOM_ANIMATION_MS = 180L
+        val MIN_ZOOM = zoomForStep(-MAX_ZOOM_OUT_STEPS)
+        val MAX_ZOOM = zoomForStep(MAX_ZOOM_STEPS)
+
+        fun zoomForStep(step: Int): Float =
+            DEFAULT_ZOOM * ZOOM_STEP.pow(step.coerceIn(-MAX_ZOOM_OUT_STEPS, MAX_ZOOM_STEPS))
+
+        private fun stepForZoom(value: Float): Int =
+            (ln((value / DEFAULT_ZOOM).coerceAtLeast(0.001f)) / ln(ZOOM_STEP))
+                .roundToInt()
+                .coerceIn(-MAX_ZOOM_OUT_STEPS, MAX_ZOOM_STEPS)
 
         const val RANGE_FILL_ALPHA = 44
         const val STAR_COUNT = 70

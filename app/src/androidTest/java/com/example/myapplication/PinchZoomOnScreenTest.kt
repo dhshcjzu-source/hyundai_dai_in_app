@@ -27,21 +27,26 @@ class PinchZoomOnScreenTest {
         SystemClock.sleep(4_000)
         capture("zoom_default")
 
+        val base = map.carRenderScale
         pinch(250f, 800f)
         SystemClock.sleep(800)
-        assertTrue("zoom=${map.zoom}", map.zoom > 2f)
+        assertTrue("zoom=${map.zoom}", map.zoom > GoMapView.DEFAULT_ZOOM)
+        assertEquals(1, map.zoomStep)
+        assertTrue("car=${map.carRenderScale}", map.carRenderScale > base)
         capture("zoom_in")
 
         pinch(800f, 250f)
         pinch(800f, 250f)
         SystemClock.sleep(800)
-        assertTrue("zoom=${map.zoom}", map.zoom < 1f)
+        assertTrue("zoom=${map.zoom}", map.zoom < GoMapView.DEFAULT_ZOOM)
+        assertEquals(-1, map.zoomStep)
         capture("zoom_out")
 
-        pinch(800f, 250f)
-        pinch(800f, 250f)
+        repeat(6) { pinch(800f, 250f) }
         SystemClock.sleep(300)
-        assertEquals(0.5f, map.zoom, 0.001f)
+        assertEquals(-3, map.zoomStep)
+        assertEquals(GoMapView.MIN_ZOOM, map.zoom, 0.01f)
+        assertTrue("car=${map.carRenderScale}", map.carRenderScale < base)
     }
 
     /** holdMs 인자를 주면 각 단계에서 멈춰, 그동안 밖에서 화면을 캡처할 수 있게 한다. */

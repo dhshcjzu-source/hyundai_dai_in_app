@@ -1,5 +1,6 @@
 package com.example.myapplication
 
+import android.Manifest
 import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import android.os.Handler
@@ -144,6 +145,7 @@ class MainActivity : AppCompatActivity() {
         osmClient = OsmClient(cacheDir)
         bindViews()
         readDebugOverrides()
+        startVehicleGateway()
         requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
         render()
     }
@@ -154,7 +156,10 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PERMISSIONS && gateway == null) startVehicleGateway()
+        if (requestCode == REQUEST_PERMISSIONS) {
+            if (gateway == null) startVehicleGateway()
+            else gateway?.onPermissionsUpdated()
+        }
     }
 
     override fun onStart() {
@@ -242,8 +247,8 @@ class MainActivity : AppCompatActivity() {
             zoomOutButton.isEnabled = map.canZoomOut
             viewButton.setText(if (map.zoomGoal >= CLOSE_VIEW_THRESHOLD) R.string.view_overview else R.string.view_close)
         }
-        // 테슬라 내비처럼 차 가까이에서 시작한다.
-        map.setZoomNow(CLOSE_ZOOM)
+        // 기본 배율(0단계)에서 시작해 핀치줌/핀치아웃을 각각 최대 5번씩 할 수 있게 한다.
+        map.setZoomNow(GoMapView.DEFAULT_ZOOM)
         demoButton.setOnClickListener { toggleDemo() }
         findViewById<View>(R.id.backButton).setOnClickListener { selectStation(null) }
         reserveButton.setOnClickListener { reserveSelected() }
@@ -267,21 +272,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onVehicleLocation(position: GeoPoint) {
-        if (source == PositionSource.DEMO) return
-        // 첫 GPS 수신 시 가상 충전소를 실제 차량 주변으로 옮긴다.
-        if (source == PositionSource.DEFAULT && network.reservation() == null) {
+        if (demoDriving || routeLoading) return
+        val firstFix = source == PositionSource.DEFAULT
+        val movedMeters = position.distanceTo(car)
+        // 첫 GPS 수신 시 또는 시뮬레이션 상태에서 위치가 크게 바뀌면 주변 충전소를 현 위치 기준으로 다시 잡는다.
+        if ((firstFix || (stationSource == StationSource.SIMULATED && movedMeters > STATIONS_REFRESH_METERS)) &&
+            network.reservation() == null
+        ) {
             network = SimulatedChargingNetwork(position)
         }
-        // 기본 위치에서 첫 GPS로 건너뛴 것은 주행이 아니므로 방향에 반영하지 않는다.
-        if (source == PositionSource.VEHICLE && position.distanceTo(car) > MIN_HEADING_MOVE_METERS) {
+        // 실제 GPS 이동 시 차량 헤딩과 카메라 방향을 이동 방향으로 회전시킨다.
+        if (!firstFix && movedMeters in MIN_HEADING_MOVE_METERS..MAX_DRIVING_STEP_METERS) {
             heading = car.bearingTo(position)
+            map.followHeading = true
         }
         car = position
         source = PositionSource.VEHICLE
+        map.setCar(car, heading)
+        render()
     }
 
     /**
-     * 선택한 충전소로, 선택이 없으면 가장 가까운 충전소로 가상 주행한다.
+     * 선택한 충전소로, 선택이 없으면 주행 거리가 있는 가까운 충전소로 가상 주행한다.
      * TMAP 경로가 있으면 실제 도로를 따라가고, 없으면 직선으로 간다.
      */
     private fun toggleDemo() {
@@ -291,6 +303,8 @@ class MainActivity : AppCompatActivity() {
         }
         val stations = network.stations()
         val target = stations.firstOrNull { it.id == selectedStationId }
+            ?: stations.filter { car.distanceTo(it.position) > ARRIVAL_RADIUS_METERS }
+                .minByOrNull { car.distanceTo(it.position) }
             ?: stations.minByOrNull { car.distanceTo(it.position) }
             ?: return
         source = PositionSource.DEMO
@@ -319,6 +333,7 @@ class MainActivity : AppCompatActivity() {
         navRoute = null
         map.setRoute(null)
         map.followHeading = false
+        if (source == PositionSource.DEMO) source = PositionSource.VEHICLE
         if (arrived) toast(R.string.nav_arrived_toast)
         render()
     }
@@ -464,11 +479,12 @@ class MainActivity : AppCompatActivity() {
                 sceneRetryAt = SystemClock.elapsedRealtime() + SCENE_RETRY_MS
             } else {
                 map.setScene(scene)
+                if (center.distanceTo(car) >= SCENE_REFRESH_METERS) {
+                    refreshScene(SystemClock.elapsedRealtime())
+                }
             }
         }
-        if (chargerClient.isConfigured) {
-            chargerClient.fetchFacilities(center) { facilities -> facilities?.let(map::setFacilities) }
-        }
+        // 전기차 충전소만 표시한다. 편의점/카페/음식점 등 주변 시설은 조회하지 않는다.
     }
 
     /** 실시간 모드에서 1분마다 바뀐 충전기 상태를 받아 반영한다. */
@@ -703,6 +719,8 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         val PERMISSIONS = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
             "pleos.car.permission.CAR_ENERGY",
             "pleos.car.permission.FUSED_LOCATION",
         )
@@ -714,22 +732,24 @@ class MainActivity : AppCompatActivity() {
         /** 시뮬레이션 1초당 실제 경과 배율. 시연에서 변화가 보이도록 빠르게 돌린다. */
         const val SIM_SPEED = 6
         const val TICK_MS = 100L
-        const val PANEL_INTERVAL_MS = 1_000L
+        /** 0.5초마다 GPS 및 화면 패널을 갱신한다. */
+        const val PANEL_INTERVAL_MS = 500L
         /** 데모 주행 속도. 실제보다 빠르게(시속 약 110km) 움직여 시연 시간을 줄인다. */
         const val NAV_SPEED_METERS_PER_SECOND = 30.0
         const val NAV_TURN_DEGREES_PER_SECOND = 220f
-        /** 근접 뷰. 도로와 건물이 실제 크기로 보이고 차 앞 약 200m까지 보인다. */
-        const val CLOSE_ZOOM = 80f
-        const val OVERVIEW_ZOOM = 1f
-        const val CLOSE_VIEW_THRESHOLD = 10f
+        /** 근접 뷰(최대 줌인 단계)와 전체 뷰(최대 줌아웃 단계). */
+        val CLOSE_ZOOM = GoMapView.MAX_ZOOM
+        val OVERVIEW_ZOOM = GoMapView.MIN_ZOOM
+        const val CLOSE_VIEW_THRESHOLD = GoMapView.DEFAULT_ZOOM
         const val LIVE_STATUS_INTERVAL_MS = 60_000L
         /** 받아 둔 지도(도로 반경 2.2km)를 벗어나기 전에 새로 받는다. */
-        const val SCENE_REFRESH_METERS = 1_000.0
+        const val SCENE_REFRESH_METERS = 500.0
         const val SCENE_RETRY_MS = 60_000L
-        const val MIN_HEADING_MOVE_METERS = 3.0
+        const val MIN_HEADING_MOVE_METERS = 0.5
+        const val MAX_DRIVING_STEP_METERS = 500.0
 
-        /** 이만큼 움직이면 주변 충전소를 다시 받는다. 검색 반경(5km)보다 작게 잡는다. */
-        const val STATIONS_REFRESH_METERS = 3_000.0
+        /** 이만큼 움직이면 주변 충전소를 다시 받는다. */
+        const val STATIONS_REFRESH_METERS = 500.0
         const val WEATHER_REFRESH_MS = 15 * 60_000L
         const val WEATHER_RETRY_MS = 60_000L
         const val WEATHER_REFRESH_METERS = 20_000.0

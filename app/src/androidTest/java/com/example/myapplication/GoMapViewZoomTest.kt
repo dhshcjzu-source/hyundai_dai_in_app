@@ -29,22 +29,35 @@ class GoMapViewZoomTest {
 
     @Test
     fun spreadingFingersZoomsIn() = onMain {
+        val base = map.carRenderScale
         pinch(fromSpan = 200f, toSpan = 600f)
-        assertTrue("zoom=${map.zoom}", map.zoom > 1.5f)
+        assertEquals(1, map.zoomStep)
+        assertTrue("zoom=${map.zoom}", map.zoom > GoMapView.DEFAULT_ZOOM)
+        assertTrue("car=${map.carRenderScale}", map.carRenderScale > base)
     }
 
     @Test
     fun pinchingFingersZoomsOut() = onMain {
+        val base = map.carRenderScale
         pinch(fromSpan = 600f, toSpan = 300f)
-        assertTrue("zoom=${map.zoom}", map.zoom < 0.8f)
+        assertEquals(-1, map.zoomStep)
+        assertTrue("zoom=${map.zoom}", map.zoom < GoMapView.DEFAULT_ZOOM)
+        assertTrue("car=${map.carRenderScale}", map.carRenderScale < base)
     }
 
     @Test
-    fun zoomStopsAtLimits() = onMain {
-        repeat(6) { pinch(fromSpan = 200f, toSpan = 1000f) }
-        assertEquals(120f, map.zoom, 0.001f)
-        repeat(6) { pinch(fromSpan = 1000f, toSpan = 200f) }
-        assertEquals(0.5f, map.zoom, 0.001f)
+    fun zoomStopsAtFiveStepsInAndThreeStepsOut() = onMain {
+        repeat(7) { pinch(fromSpan = 200f, toSpan = 1000f) }
+        assertEquals(5, map.zoomStep)
+        assertEquals(GoMapView.MAX_ZOOM, map.zoom, 0.01f)
+
+        repeat(5) { pinch(fromSpan = 1000f, toSpan = 200f) }
+        assertEquals(0, map.zoomStep)
+        assertEquals(GoMapView.DEFAULT_ZOOM, map.zoom, 0.01f)
+
+        repeat(7) { pinch(fromSpan = 1000f, toSpan = 200f) }
+        assertEquals(-3, map.zoomStep)
+        assertEquals(GoMapView.MIN_ZOOM, map.zoom, 0.01f)
     }
 
     @Test
@@ -53,7 +66,7 @@ class GoMapViewZoomTest {
         map.dispatchTouchEvent(event(time, time, MotionEvent.ACTION_DOWN, listOf(centerX to centerY)))
         map.dispatchTouchEvent(event(time, time + 50, MotionEvent.ACTION_MOVE, listOf(centerX + 300 to centerY)))
         map.dispatchTouchEvent(event(time, time + 100, MotionEvent.ACTION_UP, listOf(centerX + 300 to centerY)))
-        assertEquals(1f, map.zoom, 0.001f)
+        assertEquals(GoMapView.DEFAULT_ZOOM, map.zoom, 0.001f)
     }
 
     @Test
@@ -62,7 +75,7 @@ class GoMapViewZoomTest {
         val x = map.carScreenX
         val y = map.carScreenY
         pinch(fromSpan = 200f, toSpan = 400f)
-        assertTrue("zoom=${map.zoom}", map.zoom > 1.5f)
+        assertTrue("zoom=${map.zoom}", map.zoom > GoMapView.DEFAULT_ZOOM)
         assertEquals(x, map.carScreenX, 1f)
         assertEquals(y, map.carScreenY, 1f)
         pinch(fromSpan = 600f, toSpan = 300f)

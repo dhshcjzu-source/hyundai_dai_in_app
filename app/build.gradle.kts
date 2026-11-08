@@ -14,14 +14,15 @@ android {
         applicationId = "com.example.myapplication"
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // SK open API(TMAP) 앱 키는 git에 올리지 않는 local.properties의 tmap.appKey에서 읽는다.
         val localProperties = Properties().apply {
-            rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+            providers.fileContents(rootProject.layout.projectDirectory.file("local.properties"))
+                .asText.orNull?.reader()?.use { load(it) }
         }
         buildConfigField("String", "TMAP_APP_KEY", "\"${localProperties.getProperty("tmap.appKey", "")}\"")
         // 공공데이터포털 한국환경공단 전기자동차 충전소 정보 서비스 키
