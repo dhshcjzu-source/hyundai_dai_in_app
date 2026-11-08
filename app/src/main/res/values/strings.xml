@@ -1,0 +1,75 @@
+<resources>
+    <string name="app_name">차지GO</string>
+    <string name="sim_badge">시뮬레이션 데이터 · %1$d배속</string>
+    <string name="sim_badge_live">환경부 실시간 충전 현황 · 1분마다 갱신</string>
+    <string name="route_searching">경로 탐색 중…</string>
+    <string name="nav_summary">%1$s 도착 · %2$s · %3$d분</string>
+    <string name="nav_arrived_toast">목적지에 도착했습니다</string>
+    <string name="sim_badge_tmap">TMAP 실제 충전소 · 현황 시뮬레이션 %1$d배속</string>
+    <string name="battery_value">배터리 %1$d%%</string>
+    <string name="battery_unknown">배터리 정보 없음</string>
+    <string name="source_vehicle">위치: 차량 GPS</string>
+    <string name="source_default">위치: 기본값 (GPS 수신 대기)</string>
+    <string name="source_demo">위치: 데모 주행</string>
+    <string name="weather_value">%1$s %2$d°C · %3$s</string>
+    <string name="weather_forced">%1$s · %2$s · 시연값</string>
+    <string name="weather_unknown">날씨 정보 없음 · %1$s</string>
+    <string name="weather_clear">맑음</string>
+    <string name="weather_partly">구름 조금</string>
+    <string name="weather_cloudy">흐림</string>
+    <string name="weather_fog">안개</string>
+    <string name="weather_rain">비</string>
+    <string name="weather_snow">눈</string>
+    <string name="weather_thunder">뇌우</string>
+    <string name="phase_day">낮</string>
+    <string name="phase_night">밤</string>
+    <string name="phase_dawn">새벽</string>
+    <string name="phase_dusk">노을</string>
+    <string name="recenter">◎ 내 위치</string>
+    <string name="rotate_label">360°</string>
+    <string name="rotate_mode">차 중심 360도 회전 모드</string>
+    <string name="rotate_on_toast">지도를 좌우로 끌면 차를 중심으로 돌아갑니다</string>
+    <string name="compass_reset">지도를 북쪽 방향으로 되돌리기</string>
+    <string name="view_overview">전체</string>
+    <string name="view_close">가까이</string>
+    <string name="zoom_in">지도 확대</string>
+    <string name="zoom_out">지도 축소</string>
+    <string name="demo_start">▶ 데모 주행</string>
+    <string name="demo_stop">■ 정지</string>
+    <string name="map_description">내 차량과 주변 충전소 지도. 충전소를 누르면 상세 정보가 열립니다.</string>
+
+    <string name="nearby_title">주변 충전소</string>
+    <string name="back">← 목록</string>
+    <string name="distance_m">%1$d m</string>
+    <string name="distance_km">%1$.1f km</string>
+    <string name="charging_count">충전 중 %1$d / %2$d대</string>
+    <string name="next_free_now">지금 %1$d자리 비어 있음</string>
+    <string name="next_free_in">다음 자리까지 %1$d분</string>
+    <string name="in_range">예약 가능</string>
+    <string name="list_summary">빈자리 %1$d대 · 가까운 순</string>
+    <string name="status_free">빈자리 %1$d</string>
+    <string name="status_wait">%1$d분 대기</string>
+
+    <string name="charger_number">%1$d번</string>
+    <string name="charger_free">비어 있음</string>
+    <string name="charger_charging">충전 중 · 약 %1$d분 남음</string>
+    <string name="charger_mine_ready">내 예약 · 비어 있음</string>
+    <string name="charger_mine_wait">내 예약 · %1$d분 후 내 차례</string>
+
+    <string name="reserve_now">%1$d번 충전기 바로 예약</string>
+    <string name="reserve_wait">%1$d번 충전기 예약 (%2$d분 대기)</string>
+    <string name="reserve_too_far">%1$s 더 가까이 가면 예약 가능</string>
+    <string name="reserve_other">다른 충전소를 예약 중입니다</string>
+
+    <string name="my_reservation">내 예약</string>
+    <string name="reservation_summary">%1$s %2$d번 충전기</string>
+    <string name="reservation_ready">자리 확보됨 · %1$d분 안에 도착하세요</string>
+    <string name="reservation_wait">앞 차량 충전 %1$d분 남음 · 이후 %2$d분간 자리 유지</string>
+    <string name="cancel">예약 취소</string>
+    <string name="start_charging">충전 시작</string>
+    <string name="reserved_toast">예약했습니다</string>
+    <string name="canceled_toast">예약을 취소했습니다</string>
+    <string name="expired_toast">시간이 지나 예약이 만료되었습니다</string>
+    <string name="charging_started_toast">충전을 시작했습니다</string>
+    <string name="too_far_toast">아직 예약 가능 거리가 아닙니다</string>
+</resources>

@@ -1,0 +1,265 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/panel_bg"
+    android:orientation="horizontal">
+
+    <FrameLayout
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="7">
+
+        <com.example.myapplication.ui.GoMapView
+            android:id="@+id/map"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/map_description" />
+
+        <LinearLayout
+            android:id="@+id/chips"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_margin="24dp"
+            android:orientation="vertical">
+
+            <TextView android:id="@+id/weatherChip" style="@style/Chip" />
+            <TextView android:id="@+id/batteryChip" style="@style/Chip" />
+            <TextView android:id="@+id/sourceChip" style="@style/Chip" />
+            <TextView android:id="@+id/simChip" style="@style/Chip" />
+        </LinearLayout>
+
+        <!-- 데모 주행 중 길 안내 -->
+        <LinearLayout
+            android:id="@+id/navBanner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="24dp"
+            android:background="@drawable/bg_nav"
+            android:gravity="center_vertical"
+            android:minWidth="460dp"
+            android:orientation="horizontal"
+            android:paddingHorizontal="28dp"
+            android:paddingVertical="20dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/navArrow"
+                android:layout_width="88dp"
+                android:layout_height="88dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_turn" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/navDistance"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/white"
+                    android:textSize="46sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/navInstruction"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxWidth="560dp"
+                    android:textColor="@color/white"
+                    android:textSize="28sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/navSummary"
+            style="@style/Chip"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="44dp"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/demoButton"
+            style="@style/ActionButton"
+            android:layout_width="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:layout_margin="24dp"
+            android:paddingHorizontal="40dp"
+            android:text="@string/demo_start" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="24dp"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <Button
+                android:id="@+id/recenterButton"
+                style="@style/ActionButton"
+                android:layout_width="wrap_content"
+                android:paddingHorizontal="32dp"
+                android:text="@string/recenter"
+                android:visibility="gone" />
+
+            <ImageView
+                android:id="@+id/compassButton"
+                android:layout_width="96dp"
+                android:layout_height="96dp"
+                android:layout_marginTop="12dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/bg_compass"
+                android:clickable="true"
+                android:contentDescription="@string/compass_reset"
+                android:focusable="true"
+                android:padding="16dp"
+                android:src="@drawable/ic_compass"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/rotateButton"
+                style="@style/ZoomButton"
+                android:contentDescription="@string/rotate_mode"
+                android:text="@string/rotate_label"
+                android:textColor="@color/toggle_button_text"
+                android:textSize="28sp"
+                app:backgroundTint="@color/toggle_button_bg" />
+
+            <Button
+                android:id="@+id/viewButton"
+                style="@style/ZoomButton"
+                android:text="@string/view_overview"
+                android:textSize="24sp" />
+
+            <Button
+                android:id="@+id/zoomInButton"
+                style="@style/ZoomButton"
+                android:contentDescription="@string/zoom_in"
+                android:text="＋" />
+
+            <Button
+                android:id="@+id/zoomOutButton"
+                style="@style/ZoomButton"
+                android:contentDescription="@string/zoom_out"
+                android:text="−" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <ScrollView
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="3"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="28dp">
+
+            <!-- 예약 카드 -->
+            <LinearLayout
+                android:id="@+id/reservationCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="28dp"
+                android:background="@drawable/bg_card_highlight"
+                android:orientation="vertical"
+                android:padding="24dp"
+                android:visibility="gone">
+
+                <TextView style="@style/Caption" android:text="@string/my_reservation" android:textColor="@color/accent_free" />
+                <TextView android:id="@+id/reservationTitle" style="@style/Title" />
+                <TextView android:id="@+id/reservationDetail" style="@style/Body" />
+
+                <Button
+                    android:id="@+id/startChargingButton"
+                    style="@style/ActionButton"
+                    android:text="@string/start_charging" />
+
+                <Button
+                    android:id="@+id/cancelButton"
+                    style="@style/SecondaryButton"
+                    android:text="@string/cancel" />
+            </LinearLayout>
+
+            <!-- 충전소 목록 -->
+            <LinearLayout
+                android:id="@+id/listPane"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView style="@style/Heading" android:text="@string/nearby_title" />
+                <TextView android:id="@+id/listSummary" style="@style/Secondary" android:layout_marginTop="4dp" />
+
+                <LinearLayout
+                    android:id="@+id/stationRows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
+            <!-- 충전소 상세 -->
+            <LinearLayout
+                android:id="@+id/detailPane"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <Button
+                    android:id="@+id/backButton"
+                    style="@style/SecondaryButton"
+                    android:layout_width="wrap_content"
+                    android:layout_marginTop="0dp"
+                    android:text="@string/back" />
+
+                <TextView android:id="@+id/detailName" style="@style/Heading" android:layout_marginTop="16dp" />
+                
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView android:id="@+id/detailNextFree" style="@style/StatusPill" />
+
+                    <TextView
+                        android:id="@+id/detailDistance"
+                        style="@style/Metric"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:gravity="end" />
+                </LinearLayout>
+
+                <com.example.myapplication.ui.ChargerBar
+                    android:id="@+id/detailBar"
+                    android:layout_width="match_parent"
+                    android:layout_height="12dp"
+                    android:layout_marginTop="16dp" />
+
+                <TextView android:id="@+id/detailCharging" style="@style/Secondary" android:layout_marginTop="10dp" />
+
+                <LinearLayout
+                    android:id="@+id/chargerRows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:orientation="vertical" />
+
+                <Button android:id="@+id/reserveButton" style="@style/ActionButton" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

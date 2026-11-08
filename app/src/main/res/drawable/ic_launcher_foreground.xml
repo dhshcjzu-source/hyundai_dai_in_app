@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 1024 좌표로 그린 아이콘을 적응형 아이콘 안전 영역(가운데 66dp) 안으로 줄여 넣는다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.085"
+        android:scaleY="0.085"
+        android:translateX="10.48"
+        android:translateY="11.08">
+        <!-- 예약 범위 링 -->
+        <path
+            android:fillColor="#2978E4FF"
+            android:pathData="M212,735a300,104 0 1,0 600,0a300,104 0 1,0 -600,0z"
+            android:strokeColor="#FF78E4FF"
+            android:strokeWidth="16" />
+        <path
+            android:pathData="M347,735a165,55 0 1,0 330,0a165,55 0 1,0 -330,0z"
+            android:strokeColor="#8C78E4FF"
+            android:strokeWidth="10" />
+        <!-- 충전소 마커 -->
+        <path
+            android:pathData="M512,170L722,291L722,533L512,654L302,533L302,291Z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeLineJoin="round"
+            android:strokeWidth="20">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear" android:startX="512" android:startY="170" android:endX="512" android:endY="654">
+                    <item android:color="#FF6BF2B8" android:offset="0" />
+                    <item android:color="#FF2CC486" android:offset="1" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path
+            android:fillColor="#FF0F2430"
+            android:pathData="M556,232L400,432L498,432L466,592L626,382L524,382Z"
+            android:strokeColor="#FF0F2430"
+            android:strokeLineJoin="round"
+            android:strokeWidth="14" />
+        <!-- 내 차 -->
+        <group android:translateX="512" android:translateY="760">
+            <path android:fillColor="#FF12161C" android:pathData="M-84,-5a9,9 0 0,1 9,-9h8a9,9 0 0,1 9,9v38a9,9 0 0,1 -9,9h-8a9,9 0 0,1 -9,-9z" />
+            <path android:fillColor="#FF12161C" android:pathData="M58,-5a9,9 0 0,1 9,-9h8a9,9 0 0,1 9,9v38a9,9 0 0,1 -9,9h-8a9,9 0 0,1 -9,-9z" />
+            <path android:fillColor="#FFB0304E" android:pathData="M-76,-22a24,24 0 0,1 24,-24h104a24,24 0 0,1 24,24v26a24,24 0 0,1 -24,24h-104a24,24 0 0,1 -24,-24z" />
+            <path android:fillColor="#FFFF809A" android:pathData="M-50,-48L-34,-88Q-30,-96 -20,-96L20,-96Q30,-96 34,-88L50,-48Z" />
+            <path android:fillColor="#FF182634" android:pathData="M-36,-52L-25,-82L25,-82L36,-52Z" />
+            <path android:fillColor="#FFFF5C7A" android:pathData="M-76,-32a24,24 0 0,1 24,-24h104a24,24 0 0,1 24,24v22a24,24 0 0,1 -24,24h-104a24,24 0 0,1 -24,-24z" />
+            <path android:fillColor="#FFFFF4BE" android:pathData="M-64,-24a6,6 0 0,1 6,-6h18a6,6 0 0,1 6,6v1a6,6 0 0,1 -6,6h-18a6,6 0 0,1 -6,-6z" />
+            <path android:fillColor="#FFFFF4BE" android:pathData="M34,-24a6,6 0 0,1 6,-6h18a6,6 0 0,1 6,6v1a6,6 0 0,1 -6,6h-18a6,6 0 0,1 -6,-6z" />
+        </group>
+    </group>
+</vector>
