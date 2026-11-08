@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.myapplication.data.SimulatedChargingNetwork
+import com.example.myapplication.data.TmapChargerClient
 import com.example.myapplication.data.WeatherClient
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.ARRIVAL_RADIUS_METERS
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.RESERVE_RADIUS_METERS
@@ -76,6 +77,10 @@ class MainActivity : AppCompatActivity() {
     private var lastPanelAt = 0L
 
     private val weatherClient = WeatherClient()
+    private val chargerClient = TmapChargerClient(BuildConfig.TMAP_APP_KEY)
+    private var stationsRequestedFor: GeoPoint? = null
+    private var stationsLoading = false
+    private lateinit var simChip: TextView
     private var weather: Weather? = null
     private var weatherRequestedAt = 0L
     private var weatherRequestedFor: GeoPoint? = null
@@ -135,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         gateway?.stop()
         gateway = null
         weatherClient.close()
+        chargerClient.close()
         super.onDestroy()
     }
 
@@ -161,7 +167,8 @@ class MainActivity : AppCompatActivity() {
         reserveButton = findViewById(R.id.reserveButton)
 
         batteryChip.setText(R.string.battery_unknown)
-        findViewById<TextView>(R.id.simChip).text = getString(R.string.sim_badge, SIM_SPEED)
+        simChip = findViewById(R.id.simChip)
+        simChip.text = getString(R.string.sim_badge, SIM_SPEED)
 
         map.onStationTapped = ::selectStation
         val zoomInButton = findViewById<View>(R.id.zoomInButton)
@@ -295,6 +302,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 실제 위치를 받으면 그 주변의 실제 충전소를 TMAP에서 받아 시뮬레이터를 다시 만든다. */
+    private fun refreshStations() {
+        if (!chargerClient.isConfigured || stationsLoading || source == PositionSource.DEFAULT) return
+        if (stationsRequestedFor?.let { it.distanceTo(car) < STATIONS_REFRESH_METERS } == true) return
+        // 예약 중에는 충전소 목록을 바꾸지 않는다.
+        if (network.reservation() != null) return
+        stationsLoading = true
+        stationsRequestedFor = car
+        val center = car
+        chargerClient.fetch(center) { plans ->
+            stationsLoading = false
+            if (plans == null || network.reservation() != null) return@fetch
+            network = SimulatedChargingNetwork(center, plans)
+            simChip.text = getString(R.string.sim_badge_tmap, SIM_SPEED)
+            render()
+        }
+    }
+
     private fun refreshWeather(now: Long) {
         if (forcedWeather != null || weatherLoading) return
         val movedFar = weatherRequestedFor?.let { it.distanceTo(car) > WEATHER_REFRESH_METERS } ?: true
@@ -346,6 +371,7 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         lastPanelAt = SystemClock.elapsedRealtime()
         refreshWeather(lastPanelAt)
+        refreshStations()
         renderAmbience()
         val stations = network.stations()
         val reservation = network.reservation()
@@ -514,6 +540,8 @@ class MainActivity : AppCompatActivity() {
         const val DEMO_STOP_METERS = 40.0
         const val MIN_HEADING_MOVE_METERS = 3.0
 
+        /** 이만큼 움직이면 주변 충전소를 다시 받는다. 검색 반경(5km)보다 작게 잡는다. */
+        const val STATIONS_REFRESH_METERS = 3_000.0
         const val WEATHER_REFRESH_MS = 15 * 60_000L
         const val WEATHER_RETRY_MS = 60_000L
         const val WEATHER_REFRESH_METERS = 20_000.0

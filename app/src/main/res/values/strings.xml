@@ -1,6 +1,7 @@
 <resources>
     <string name="app_name">차지GO</string>
     <string name="sim_badge">시뮬레이션 데이터 · %1$d배속</string>
+    <string name="sim_badge_tmap">TMAP 실제 충전소 · 현황 시뮬레이션 %1$d배속</string>
     <string name="battery_value">배터리 %1$d%%</string>
     <string name="battery_unknown">배터리 정보 없음</string>
     <string name="source_vehicle">위치: 차량 GPS</string>
