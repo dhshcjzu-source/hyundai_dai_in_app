@@ -15,6 +15,8 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewConfiguration
+import com.example.myapplication.map.Facility
+import com.example.myapplication.map.MapScene
 import com.example.myapplication.model.Ambience
 import com.example.myapplication.model.GeoPoint
 import com.example.myapplication.model.Station
@@ -23,6 +25,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.ln
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -76,6 +79,8 @@ class GoMapView @JvmOverloads constructor(
 
     /** 확대, 축소 가능 여부가 바뀔 수 있을 때 호출된다. */
     var onZoomLimitsChanged: (() -> Unit)? = null
+    /** 애니메이션이 끝났을 때의 배율. */
+    val zoomGoal get() = zoomTarget
     val canZoomIn get() = zoomTarget < MAX_ZOOM
     val canZoomOut get() = zoomTarget > MIN_ZOOM
 
@@ -94,6 +99,16 @@ class GoMapView @JvmOverloads constructor(
     private var lastFrameAt = 0L
 
     private var route: NavRoute? = null
+    private var scene: MapScene? = null
+    private var facilities: List<Facility> = emptyList()
+
+    // 다각형을 그릴 때 다시 쓰는 좌표 배열. 매 프레임 새로 만들지 않는다.
+    private var viewXs = FloatArray(64)
+    private var viewYs = FloatArray(64)
+    private var clipXs = FloatArray(128)
+    private var clipYs = FloatArray(128)
+    private var buildingOrder = IntArray(0)
+    private var buildingDepth = FloatArray(0)
     private var routeProgress = 0.0
 
     /** [bearing]이 바뀔 때 호출된다. */
@@ -180,6 +195,28 @@ class GoMapView @JvmOverloads constructor(
     private fun toNorth(right: Float, forward: Float) = -right * bearingSin + forward * bearingCos
 
     fun zoomTo(value: Float) = animateZoomTo(value)
+
+    /** 애니메이션 없이 바로 배율을 바꾼다. */
+    fun setZoomNow(value: Float) = setZoomDirectly(value)
+
+    /**
+     * 멀리서 볼 때만 도로 폭과 건물 높이를 키운다. 가까이 볼수록 실제 크기로 돌아간다.
+     * 0이면 실제 크기, 1이면 가장 많이 키운 상태다.
+     */
+    private val exaggeration
+        get() = ((ln(TRUE_SCALE_ZOOM) - ln(zoom)) / (ln(TRUE_SCALE_ZOOM) - ln(FULL_EXAGGERATION_ZOOM))).coerceIn(0f, 1f)
+
+    /** 실제 도로와 건물. 있으면 장식용 바둑판 도로 대신 그린다. */
+    fun setScene(next: MapScene?) {
+        scene = next
+        val count = next?.buildings?.size ?: 0
+        buildingOrder = IntArray(count) { it }
+        buildingDepth = FloatArray(count)
+    }
+
+    fun setFacilities(next: List<Facility>) {
+        facilities = next
+    }
 
     /** 그릴 주행 경로. null이면 지운다. */
     fun setRoute(next: NavRoute?) {
@@ -309,9 +346,12 @@ class GoMapView @JvmOverloads constructor(
         followCarHeading()
         drawRangeRing(canvas, look, time)
         drawRoute(canvas, position)
+        drawBuildings(canvas, position, look)
+        drawFacilities(canvas, position)
         drawStations(canvas, position, time)
         drawCar(canvas, look, time)
         drawPrecipitation(canvas, look, time)
+        if (scene != null) drawAttribution(canvas)
         postInvalidateOnAnimation()
     }
 
@@ -322,6 +362,12 @@ class GoMapView @JvmOverloads constructor(
         val viewSide = VIEW_SIDE / zoom
         val viewBack = VIEW_BACK / zoom
         val viewFront = VIEW_FRONT / zoom
+
+        scene?.let { real ->
+            drawScene(canvas, real, position, look)
+            drawSky(canvas, look, time)
+            return
+        }
 
         // 돌아간 시야 사각형을 모두 덮는 동서남북 범위. 회전이 없으면 시야 사각형과 같다.
         val spanEast = abs(viewSide * bearingCos)
@@ -366,6 +412,217 @@ class GoMapView @JvmOverloads constructor(
 
         drawSky(canvas, look, time)
     }
+
+    /** 녹지와 물을 깔고 그 위에 실제 도로를 그린다. 멀리 있는 도로도 보이도록 폭을 키워 그린다. */
+    private fun drawScene(canvas: Canvas, real: MapScene, position: GeoPoint, look: Ambience) {
+        val (offsetEast, offsetNorth) = position.metersFrom(real.origin)
+        val east = offsetEast.toFloat()
+        val north = offsetNorth.toFloat()
+        for (area in real.areas) {
+            fill.color = when (area.kind) {
+                MapScene.AreaKind.GREEN -> look.park
+                MapScene.AreaKind.PITCH -> blend(look.park, PITCH_COLOR, 0.35f)
+                MapScene.AreaKind.WATER -> blend(look.ground, WATER_COLOR, 0.65f)
+            }
+            fillGroundPolygon(canvas, toView(area.east, area.north, east, north))
+        }
+        stroke.strokeCap = Paint.Cap.ROUND
+        val roadScale = 1f + (ROAD_WIDTH_SCALE - 1f) * exaggeration
+        for (road in real.roads) {
+            stroke.color = if (road.major) look.majorRoad else look.minorRoad
+            val count = toView(road.east, road.north, east, north)
+            for (i in 0 until count - 1) {
+                var ax = viewXs[i]
+                var ay = viewYs[i]
+                var bx = viewXs[i + 1]
+                var by = viewYs[i + 1]
+                if (ay < nearY && by < nearY) continue
+                if (ay < nearY) {
+                    ax += (bx - ax) * (nearY - ay) / (by - ay); ay = nearY
+                } else if (by < nearY) {
+                    bx += (ax - bx) * (nearY - by) / (ay - by); by = nearY
+                }
+                stroke.strokeWidth = road.widthMeters * roadScale * pixelsPerMeter((ay + by) / 2)
+                canvas.drawLine(screenX(ax, ay), screenY(ay), screenX(bx, by), screenY(by), stroke)
+            }
+        }
+        stroke.strokeCap = Paint.Cap.BUTT
+    }
+
+    /**
+     * 건물을 층수만큼 세운 블록으로 그린다. 먼 건물부터 그리고, 카메라를 등진 벽은 그리지 않는다.
+     * 위에서 멀리 내려다보는 시점이라 실제 높이로는 거의 안 보여서 높이를 키운다.
+     */
+    private fun drawBuildings(canvas: Canvas, position: GeoPoint, look: Ambience) {
+        val real = scene ?: return
+        val (offsetEast, offsetNorth) = position.metersFrom(real.origin)
+        val east = offsetEast.toFloat()
+        val north = offsetNorth.toFloat()
+        val far = BUILDING_FAR_METERS
+        val heightScale = 1f + (BUILDING_HEIGHT_SCALE - 1f) * exaggeration
+        real.buildings.forEachIndexed { index, building ->
+            val dx = building.east[0] - east
+            val dy = building.north[0] - north
+            buildingDepth[index] = toViewY(dx, dy) - panForward
+        }
+        val order = buildingOrder.sortedByDescending { buildingDepth[it] }
+        val cameraY = -CAMERA_BACK / zoom
+        val wall = tint(WALL_COLOR, look.carTint)
+        val roof = tint(ROOF_COLOR, look.carTint)
+        for (index in order) {
+            if (buildingDepth[index] < nearY + 100f || buildingDepth[index] > far) continue
+            val building = real.buildings[index]
+            val count = toView(building.east, building.north, east, north)
+            if ((0 until count).any { viewYs[it] < nearY + 1f }) continue
+            val height = building.heightMeters * heightScale
+            // 꼭짓점 순서(시계/반시계)에 따라 바깥쪽 방향이 달라진다.
+            var area = 0f
+            for (i in 0 until count - 1) area += viewXs[i] * viewYs[i + 1] - viewXs[i + 1] * viewYs[i]
+            val outward = if (area > 0) 1f else -1f
+            for (i in 0 until count - 1) {
+                val ax = viewXs[i]; val ay = viewYs[i]
+                val bx = viewXs[i + 1]; val by = viewYs[i + 1]
+                val normalX = (by - ay) * outward
+                val normalY = -(bx - ax) * outward
+                // 카메라 쪽을 보는 벽만 그린다.
+                if (normalX * (0f - (ax + bx) / 2) + normalY * (cameraY - (ay + by) / 2) <= 0f) continue
+                val length = hypot(normalX, normalY).coerceAtLeast(0.001f)
+                val light = 0.72f + 0.28f * ((normalX * LIGHT_X + normalY * LIGHT_Y) / length).coerceIn(-1f, 1f)
+                fill.color = shadeColor(wall, light)
+                path.rewind()
+                path.moveTo(screenX(ax, ay), screenY(ay))
+                path.lineTo(screenX(bx, by), screenY(by))
+                path.lineTo(screenX(bx, by), screenYAt(by, height))
+                path.lineTo(screenX(ax, ay), screenYAt(ay, height))
+                path.close()
+                canvas.drawPath(path, fill)
+            }
+            path.rewind()
+            for (i in 0 until count) {
+                val x = screenX(viewXs[i], viewYs[i])
+                val y = screenYAt(viewYs[i], height)
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            path.close()
+            fill.color = roof
+            canvas.drawPath(path, fill)
+            stroke.color = shadeColor(wall, 0.6f)
+            stroke.strokeWidth = 1.5f * unit
+            canvas.drawPath(path, stroke)
+        }
+    }
+
+    /** 편의점, 카페, 음식점을 작은 표식으로 그린다. 가까운 곳만 이름을 붙인다. */
+    private fun drawFacilities(canvas: Canvas, position: GeoPoint) {
+        for (facility in facilities) {
+            val (east, north) = facility.position.metersFrom(position)
+            val x = toViewX(east.toFloat(), north.toFloat()) - panRight
+            val y = toViewY(east.toFloat(), north.toFloat()) - panForward
+            if (y < nearY + 50f || nearHorizon(y)) continue
+            val scale = depthScale(y)
+            val radius = FACILITY_RADIUS * unit * scale
+            val cx = screenX(x, y)
+            val cy = screenY(y) - radius * 1.2f
+            fill.color = FACILITY_COLORS.getValue(facility.kind)
+            canvas.drawCircle(cx, cy, radius, fill)
+            stroke.color = Color.WHITE
+            stroke.strokeWidth = radius * 0.16f
+            canvas.drawCircle(cx, cy, radius, stroke)
+            text.color = Color.WHITE
+            text.textSize = radius * 1.05f
+            canvas.drawText(facility.kind.glyph, cx, cy + radius * 0.38f, text)
+            if (hypot(east, north) < FACILITY_LABEL_METERS) {
+                text.textSize = max(18f * unit, 22f * unit * scale)
+                val half = text.measureText(facility.name) / 2 + text.textSize * 0.4f
+                fill.color = LABEL_PLATE_COLOR
+                canvas.drawRoundRect(
+                    cx - half, cy + radius * 1.2f, cx + half, cy + radius * 1.2f + text.textSize * 1.4f,
+                    text.textSize * 0.4f, text.textSize * 0.4f, fill,
+                )
+                canvas.drawText(facility.name, cx, cy + radius * 1.2f + text.textSize * 1.05f, text)
+            }
+        }
+    }
+
+    private fun drawAttribution(canvas: Canvas) {
+        text.textAlign = Paint.Align.RIGHT
+        text.textSize = 18f * unit
+        text.color = Color.argb(200, 255, 255, 255)
+        canvas.drawText("© OpenStreetMap contributors", width - 16f * unit, 30f * unit, text)
+        text.textAlign = Paint.Align.CENTER
+    }
+
+    /** 장면 좌표를 차 기준 화면 좌표(오른쪽, 안쪽)로 바꿔 [viewXs], [viewYs]에 담는다. */
+    private fun toView(east: FloatArray, north: FloatArray, offsetEast: Float, offsetNorth: Float): Int {
+        val count = east.size
+        if (viewXs.size < count) {
+            viewXs = FloatArray(count * 2)
+            viewYs = FloatArray(count * 2)
+        }
+        for (i in 0 until count) {
+            val dx = east[i] - offsetEast
+            val dy = north[i] - offsetNorth
+            viewXs[i] = toViewX(dx, dy) - panRight
+            viewYs[i] = toViewY(dx, dy) - panForward
+        }
+        return count
+    }
+
+    /** [toView]로 바꾼 다각형을 카메라 뒤쪽을 잘라내고 바닥에 칠한다. */
+    private fun fillGroundPolygon(canvas: Canvas, count: Int) {
+        if (count < 3) return
+        if ((0 until count).all { viewYs[it] < nearY }) return
+        if (clipXs.size < count * 2) {
+            clipXs = FloatArray(count * 2)
+            clipYs = FloatArray(count * 2)
+        }
+        var out = 0
+        for (i in 0 until count) {
+            val next = (i + 1) % count
+            val ay = viewYs[i]
+            val by = viewYs[next]
+            if (ay >= nearY) {
+                clipXs[out] = viewXs[i]; clipYs[out] = ay; out++
+            }
+            if ((ay >= nearY) != (by >= nearY)) {
+                clipXs[out] = viewXs[i] + (viewXs[next] - viewXs[i]) * (nearY - ay) / (by - ay)
+                clipYs[out] = nearY
+                out++
+            }
+        }
+        if (out < 3) return
+        path.rewind()
+        for (i in 0 until out) {
+            val x = screenX(clipXs[i], clipYs[i])
+            val y = screenY(clipYs[i])
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+        canvas.drawPath(path, fill)
+    }
+
+    private fun nearHorizon(y: Float) = screenY(y) < horizonY + HORIZON_MARGIN * unit
+
+    private fun pixelsPerMeter(y: Float) = focal * zoom / (y * zoom + CAMERA_BACK)
+
+    private fun blend(from: Int, to: Int, amount: Float): Int = Color.rgb(
+        (Color.red(from) + (Color.red(to) - Color.red(from)) * amount).toInt(),
+        (Color.green(from) + (Color.green(to) - Color.green(from)) * amount).toInt(),
+        (Color.blue(from) + (Color.blue(to) - Color.blue(from)) * amount).toInt(),
+    )
+
+    /** 낮밤 밝기([Ambience.carTint])를 건물 색에 곱한다. */
+    private fun tint(color: Int, light: Int): Int = Color.rgb(
+        Color.red(color) * Color.red(light) / 255,
+        Color.green(color) * Color.green(light) / 255,
+        Color.blue(color) * Color.blue(light) / 255,
+    )
+
+    private fun shadeColor(color: Int, factor: Float): Int = Color.rgb(
+        (Color.red(color) * factor).toInt().coerceIn(0, 255),
+        (Color.green(color) * factor).toInt().coerceIn(0, 255),
+        (Color.blue(color) * factor).toInt().coerceIn(0, 255),
+    )
 
     private fun drawSky(canvas: Canvas, look: Ambience, time: Float) {
         // 카메라가 돌면 하늘도 함께 흘러간다. 한 바퀴에 화면 SKY_SCREENS_PER_TURN개만큼 움직인다.
@@ -582,7 +839,9 @@ class GoMapView @JvmOverloads constructor(
             bx += (ax - bx) * (near - by) / (ay - by)
             by = near
         }
-        val width = ROUTE_WIDTH * unit * depthScale((ay + by) / 2) * sqrt(zoom)
+        // 멀리서는 화면 기준 굵기, 가까이서는 차선 하나 정도의 실제 폭으로 그린다.
+        val middle = (ay + by) / 2
+        val width = max(ROUTE_WIDTH * unit * depthScale(middle) * sqrt(min(zoom, 3f)), ROUTE_METERS * pixelsPerMeter(middle))
         stroke.strokeCap = Paint.Cap.ROUND
         stroke.strokeWidth = if (outline) width * 1.5f else width
         stroke.color = when {
@@ -608,6 +867,8 @@ class GoMapView @JvmOverloads constructor(
             val x = right - panRight
             val y = forward - panForward
             val inRange = hypot(right, forward) <= reserveRadius
+            // 지평선에 붙은 먼 표식은 겹쳐서 읽을 수 없으므로 숨긴다. 선택한 충전소는 항상 보인다.
+            if (station.id != selectedId && nearHorizon(y)) continue
             drawStation(canvas, station, screenX(x, y), screenY(y), depthScale(y), inRange, time)
         }
     }
@@ -741,6 +1002,9 @@ class GoMapView @JvmOverloads constructor(
 
     private fun screenX(x: Float, y: Float) = centerX + focal * x * zoom / (y * zoom + CAMERA_BACK)
     private fun screenY(y: Float) = horizonY + focal * CAMERA_HEIGHT / (y * zoom + CAMERA_BACK)
+
+    /** 바닥에서 [height]미터 위에 있는 점의 화면 y. */
+    private fun screenYAt(y: Float, height: Float) = horizonY + focal * (CAMERA_HEIGHT - height * zoom) / (y * zoom + CAMERA_BACK)
     private fun depthScale(y: Float) = (CAMERA_BACK / (y * zoom + CAMERA_BACK)).coerceIn(0.55f, 1.3f)
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -849,16 +1113,36 @@ class GoMapView @JvmOverloads constructor(
         const val BEARING_RESET_MS = 320L
         const val SKY_SCREENS_PER_TURN = 3f
         const val FOLLOW_RATE = 4f
+        const val ROAD_WIDTH_SCALE = 3f
+        const val TRUE_SCALE_ZOOM = 40f
+        const val HORIZON_MARGIN = 110f
+        const val FULL_EXAGGERATION_ZOOM = 2f
+        const val ROUTE_METERS = 4f
+        const val BUILDING_FAR_METERS = 2_500f
+        const val BUILDING_HEIGHT_SCALE = 4f
+        const val FACILITY_RADIUS = 20f
+        const val FACILITY_LABEL_METERS = 350.0
+        const val LIGHT_X = -0.6f
+        const val LIGHT_Y = -0.8f
+        val WATER_COLOR = Color.rgb(64, 140, 210)
+        val PITCH_COLOR = Color.rgb(200, 120, 90)
+        val WALL_COLOR = Color.rgb(196, 202, 212)
+        val ROOF_COLOR = Color.rgb(232, 235, 240)
+        val FACILITY_COLORS = mapOf(
+            Facility.Kind.CONVENIENCE to Color.rgb(255, 128, 64),
+            Facility.Kind.CAFE to Color.rgb(160, 104, 70),
+            Facility.Kind.FOOD to Color.rgb(232, 84, 112),
+        )
         const val ROUTE_WIDTH = 22f
         val ROUTE_COLOR = Color.rgb(66, 153, 255)
         val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
         val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
         const val RECENTER_ANIMATION_MS = 280L
-        const val ZOOM_STEP = 1.5f
+        const val ZOOM_STEP = 2f
         const val WHEEL_ZOOM_STEP = 1.15f
         const val ZOOM_ANIMATION_MS = 180L
         const val MIN_ZOOM = 0.5f
-        const val MAX_ZOOM = 3f
+        const val MAX_ZOOM = 120f
         const val MIN_CAR_SCALE = 0.75f
         const val MAX_CAR_SCALE = 1.6f
 

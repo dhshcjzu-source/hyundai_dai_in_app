@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.example.myapplication.data.SimulatedChargingNetwork.StationPlan
+import com.example.myapplication.map.Facility
 import com.example.myapplication.model.GeoPoint
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -61,6 +62,56 @@ class TmapChargerClient(private val appKey: String) {
     } catch (e: Exception) {
         Log.w(TAG, "지역 코드 조회 실패", e)
         null
+    }
+
+    /** 주변 편의점, 카페, 음식점. 종류마다 가까운 곳 몇 개만 남긴다. [onResult]는 메인 스레드에서 호출된다. */
+    fun fetchFacilities(center: GeoPoint, onResult: (List<Facility>?) -> Unit) {
+        executor.execute {
+            val facilities = try {
+                Facility.Kind.entries.flatMap { kind -> searchFacilities(center, kind) }
+            } catch (e: Exception) {
+                Log.w(TAG, "시설 조회 실패", e)
+                null
+            }
+            mainThread.post { onResult(facilities) }
+        }
+    }
+
+    private fun searchFacilities(center: GeoPoint, kind: Facility.Kind): List<Facility> {
+        val url = URL(
+            String.format(
+                Locale.US,
+                "https://apis.openapi.sk.com/tmap/pois/search/around?version=1&categories=%s" +
+                    "&centerLat=%.6f&centerLon=%.6f&radius=1&count=%d&reqCoordType=WGS84GEO&resCoordType=WGS84GEO",
+                URLEncoder.encode(kind.tmapCategory, "UTF-8"),
+                center.latitude,
+                center.longitude,
+                FACILITIES_PER_KIND,
+            ),
+        )
+        val connection = url.openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = TIMEOUT_MS
+            connection.readTimeout = TIMEOUT_MS
+            connection.setRequestProperty("appKey", appKey)
+            connection.setRequestProperty("Accept", "application/json")
+            // 결과가 없으면 204로 빈 응답이 온다.
+            if (connection.responseCode == 204) return emptyList()
+            check(connection.responseCode == 200) { "HTTP ${connection.responseCode}" }
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            if (body.isBlank()) return emptyList()
+            val pois = JSONObject(body).getJSONObject("searchPoiInfo").getJSONObject("pois").getJSONArray("poi")
+            return (0 until pois.length()).map { index ->
+                val poi = pois.getJSONObject(index)
+                Facility(
+                    name = poi.getString("name"),
+                    kind = kind,
+                    position = GeoPoint(poi.getString("noorLat").toDouble(), poi.getString("noorLon").toDouble()),
+                )
+            }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     fun close() {
@@ -131,6 +182,7 @@ class TmapChargerClient(private val appKey: String) {
         private const val SEARCH_RADIUS_KM = 5
         private const val SEARCH_COUNT = 200
         private const val MAX_STATIONS = 6
+        private const val FACILITIES_PER_KIND = 8
         private const val MIN_SPACING_METERS = 800.0
 
         // 환경부 충전기 상태 코드

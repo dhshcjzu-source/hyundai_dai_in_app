@@ -135,6 +135,12 @@
                 app:backgroundTint="@color/toggle_button_bg" />
 
             <Button
+                android:id="@+id/viewButton"
+                style="@style/ZoomButton"
+                android:text="@string/view_overview"
+                android:textSize="24sp" />
+
+            <Button
                 android:id="@+id/zoomInButton"
                 style="@style/ZoomButton"
                 android:contentDescription="@string/zoom_in"

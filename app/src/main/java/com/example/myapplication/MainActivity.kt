@@ -23,6 +23,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.example.myapplication.data.SimulatedChargingNetwork
 import com.example.myapplication.data.EvChargerClient
+import com.example.myapplication.data.OsmClient
 import com.example.myapplication.data.TmapChargerClient
 import com.example.myapplication.data.TmapRouteClient
 import com.example.myapplication.nav.NavRoute
@@ -94,6 +95,11 @@ class MainActivity : AppCompatActivity() {
     private var liveStatusAt = 0L
     private var liveStatusLoading = false
 
+    private lateinit var osmClient: OsmClient
+    private var sceneRequestedFor: GeoPoint? = null
+    private var sceneLoading = false
+    private var sceneRetryAt = 0L
+
     private var navRoute: NavRoute? = null
     private var navProgress = 0.0
     private var routeLoading = false
@@ -135,6 +141,7 @@ class MainActivity : AppCompatActivity() {
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             WindowInsetsCompat.CONSUMED
         }
+        osmClient = OsmClient(cacheDir)
         bindViews()
         readDebugOverrides()
         requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
@@ -168,6 +175,7 @@ class MainActivity : AppCompatActivity() {
         chargerClient.close()
         evClient.close()
         routeClient.close()
+        if (::osmClient.isInitialized) osmClient.close()
         super.onDestroy()
     }
 
@@ -225,10 +233,17 @@ class MainActivity : AppCompatActivity() {
         map.onPanChanged = {
             recenterButton.visibility = if (map.isPanned) View.VISIBLE else View.GONE
         }
+        val viewButton = findViewById<Button>(R.id.viewButton)
+        viewButton.setOnClickListener {
+            map.zoomTo(if (map.zoomGoal >= CLOSE_VIEW_THRESHOLD) OVERVIEW_ZOOM else CLOSE_ZOOM)
+        }
         map.onZoomLimitsChanged = {
             zoomInButton.isEnabled = map.canZoomIn
             zoomOutButton.isEnabled = map.canZoomOut
+            viewButton.setText(if (map.zoomGoal >= CLOSE_VIEW_THRESHOLD) R.string.view_overview else R.string.view_close)
         }
+        // 테슬라 내비처럼 차 가까이에서 시작한다.
+        map.setZoomNow(CLOSE_ZOOM)
         demoButton.setOnClickListener { toggleDemo() }
         findViewById<View>(R.id.backButton).setOnClickListener { selectStation(null) }
         reserveButton.setOnClickListener { reserveSelected() }
@@ -292,7 +307,7 @@ class MainActivity : AppCompatActivity() {
             demoDriving = true
             map.setRoute(next)
             map.followHeading = true
-            map.zoomTo(NAV_ZOOM)
+            map.zoomTo(CLOSE_ZOOM)
             render()
         }
         render()
@@ -434,6 +449,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 실제 위치를 받으면 주변 실제 도로, 건물(OpenStreetMap)과 시설(TMAP)을 받는다. */
+    private fun refreshScene(now: Long) {
+        if (sceneLoading || source == PositionSource.DEFAULT || now < sceneRetryAt) return
+        if (sceneRequestedFor?.let { it.distanceTo(car) < SCENE_REFRESH_METERS } == true) return
+        sceneLoading = true
+        sceneRequestedFor = car
+        val center = car
+        osmClient.fetch(center) { scene ->
+            sceneLoading = false
+            if (scene == null) {
+                // 실패하면 잠시 뒤 다시 시도한다. 그동안은 장식용 지도를 그린다.
+                sceneRequestedFor = null
+                sceneRetryAt = SystemClock.elapsedRealtime() + SCENE_RETRY_MS
+            } else {
+                map.setScene(scene)
+            }
+        }
+        if (chargerClient.isConfigured) {
+            chargerClient.fetchFacilities(center) { facilities -> facilities?.let(map::setFacilities) }
+        }
+    }
+
     /** 실시간 모드에서 1분마다 바뀐 충전기 상태를 받아 반영한다. */
     private fun refreshLiveStatus(now: Long) {
         val region = liveRegionCode ?: return
@@ -502,6 +539,7 @@ class MainActivity : AppCompatActivity() {
         refreshWeather(lastPanelAt)
         refreshStations()
         refreshLiveStatus(lastPanelAt)
+        refreshScene(lastPanelAt)
         renderAmbience()
         val stations = network.stations()
         val reservation = network.reservation()
@@ -680,8 +718,14 @@ class MainActivity : AppCompatActivity() {
         /** 데모 주행 속도. 실제보다 빠르게(시속 약 110km) 움직여 시연 시간을 줄인다. */
         const val NAV_SPEED_METERS_PER_SECOND = 30.0
         const val NAV_TURN_DEGREES_PER_SECOND = 220f
-        const val NAV_ZOOM = 1.6f
+        /** 근접 뷰. 도로와 건물이 실제 크기로 보이고 차 앞 약 200m까지 보인다. */
+        const val CLOSE_ZOOM = 80f
+        const val OVERVIEW_ZOOM = 1f
+        const val CLOSE_VIEW_THRESHOLD = 10f
         const val LIVE_STATUS_INTERVAL_MS = 60_000L
+        /** 받아 둔 지도(도로 반경 2.2km)를 벗어나기 전에 새로 받는다. */
+        const val SCENE_REFRESH_METERS = 1_000.0
+        const val SCENE_RETRY_MS = 60_000L
         const val MIN_HEADING_MOVE_METERS = 3.0
 
         /** 이만큼 움직이면 주변 충전소를 다시 받는다. 검색 반경(5km)보다 작게 잡는다. */

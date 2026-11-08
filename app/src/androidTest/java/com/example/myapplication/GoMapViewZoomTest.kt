@@ -42,7 +42,7 @@ class GoMapViewZoomTest {
     @Test
     fun zoomStopsAtLimits() = onMain {
         repeat(6) { pinch(fromSpan = 200f, toSpan = 1000f) }
-        assertEquals(3f, map.zoom, 0.001f)
+        assertEquals(120f, map.zoom, 0.001f)
         repeat(6) { pinch(fromSpan = 1000f, toSpan = 200f) }
         assertEquals(0.5f, map.zoom, 0.001f)
     }
