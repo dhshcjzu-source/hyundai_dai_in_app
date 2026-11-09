@@ -15,7 +15,27 @@ class MapScene(
 ) {
     class Road(val east: FloatArray, val north: FloatArray, val widthMeters: Float, val major: Boolean)
 
-    class Building(val east: FloatArray, val north: FloatArray, val heightMeters: Float, val name: String?)
+    class Building(val east: FloatArray, val north: FloatArray, val heightMeters: Float, val name: String?) {
+        /** 바닥 꼭짓점의 평균(닫힌 다각형의 마지막 중복점 제외). 이름표 위치와 TMAP 이름 조회에 쓴다. */
+        val centerEast: Float
+        val centerNorth: Float
+
+        /** TMAP 역지오코딩으로 받은 건물 이름. 받기 전이거나 이름이 없으면 null. 메인 스레드에서만 바꾼다. */
+        var tmapName: String? = null
+
+        init {
+            val closed = east.size > 1 && east.first() == east.last() && north.first() == north.last()
+            val count = if (closed) east.size - 1 else east.size
+            var sumEast = 0f
+            var sumNorth = 0f
+            for (i in 0 until count) {
+                sumEast += east[i]
+                sumNorth += north[i]
+            }
+            centerEast = sumEast / count
+            centerNorth = sumNorth / count
+        }
+    }
 
     class Area(val east: FloatArray, val north: FloatArray, val kind: AreaKind)
 

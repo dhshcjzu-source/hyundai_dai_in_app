@@ -44,7 +44,7 @@ class PinchZoomOnScreenTest {
 
         repeat(6) { pinch(800f, 250f) }
         SystemClock.sleep(300)
-        assertEquals(-3, map.zoomStep)
+        assertEquals(-2, map.zoomStep)
         assertEquals(GoMapView.MIN_ZOOM, map.zoom, 0.01f)
         assertTrue("car=${map.carRenderScale}", map.carRenderScale < base)
     }

@@ -1,7 +1,11 @@
 package com.example.myapplication
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -22,7 +26,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.example.myapplication.data.SimulatedChargingNetwork
+import com.example.myapplication.data.BuildingNameClient
 import com.example.myapplication.data.EvChargerClient
 import com.example.myapplication.data.OsmClient
 import com.example.myapplication.data.TmapChargerClient
@@ -31,6 +37,7 @@ import com.example.myapplication.nav.NavRoute
 import com.example.myapplication.data.WeatherClient
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.ARRIVAL_RADIUS_METERS
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.RESERVE_RADIUS_METERS
+import com.example.myapplication.map.MapScene
 import com.example.myapplication.model.Ambience
 import com.example.myapplication.model.Charger
 import com.example.myapplication.model.GeoPoint
@@ -75,6 +82,8 @@ class MainActivity : AppCompatActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var gateway: VehicleGateway? = null
+    /** 설정 화면으로 권한을 켜러 갔는지. 돌아오면 권한을 다시 확인한다. */
+    private var awaitingSettingsReturn = false
 
     private var car = DEFAULT_POSITION
     private var heading = PARKED_HEADING
@@ -98,6 +107,8 @@ class MainActivity : AppCompatActivity() {
     private var liveStatusLoading = false
 
     private lateinit var osmClient: OsmClient
+    private lateinit var buildingNameClient: BuildingNameClient
+    private var currentScene: MapScene? = null
     private var sceneRequestedFor: GeoPoint? = null
     private var sceneLoading = false
     private var sceneRetryAt = 0L
@@ -144,11 +155,74 @@ class MainActivity : AppCompatActivity() {
             WindowInsetsCompat.CONSUMED
         }
         osmClient = OsmClient(cacheDir)
+        buildingNameClient = BuildingNameClient(BuildConfig.TMAP_APP_KEY, cacheDir)
         bindViews()
         readDebugOverrides()
         startVehicleGateway()
-        requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
+        ensureLocationPermission()
         render()
+    }
+
+    private fun hasPermission(permission: String) =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun hasLocationPermission() = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    /** 위치 권한이 없으면 먼저 안내 팝업을 띄우고, 동의하면 시스템 권한 요청을 띄운다. */
+    private fun ensureLocationPermission() {
+        val missing = PERMISSIONS.filterNot(::hasPermission)
+        if (missing.isEmpty()) return
+        if (hasLocationPermission()) {
+            // 위치는 이미 허용됨. 차량(Pleos) 권한만 남았으면 바로 요청한다.
+            requestPermissions(missing.toTypedArray(), REQUEST_PERMISSIONS)
+            return
+        }
+        showPermissionDialog(R.string.location_permission_message, R.string.location_permission_allow) {
+            requestPermissions(PERMISSIONS, REQUEST_PERMISSIONS)
+        }
+    }
+
+    /** "다시 묻지 않음" 상태라 시스템 팝업이 안 뜰 때, 앱 설정 화면으로 안내한다. */
+    private fun showLocationSettingsDialog() {
+        showPermissionDialog(R.string.location_permission_settings_message, R.string.location_permission_open_settings) {
+            awaitingSettingsReturn = true
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+            )
+        }
+    }
+
+    /** 차량 화면용 큰 글씨 권한 팝업. "나중에"를 누르면 대략적인 위치로 계속 쓴다. */
+    private fun showPermissionDialog(@StringRes message: Int, @StringRes allowText: Int, onAllow: () -> Unit) {
+        val content = LayoutInflater.from(this).inflate(R.layout.dialog_permission, null)
+        content.findViewById<TextView>(R.id.permissionMessage).setText(message)
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setView(content)
+            .setCancelable(false)
+            .create()
+        content.findViewById<Button>(R.id.permissionAllow).apply {
+            setText(allowText)
+            setOnClickListener {
+                dialog.dismiss()
+                onAllow()
+            }
+        }
+        content.findViewById<Button>(R.id.permissionLater).setOnClickListener {
+            dialog.dismiss()
+            toast(R.string.location_permission_denied_toast)
+        }
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+        dialog.show()
+        val screenWidth = resources.displayMetrics.widthPixels
+        dialog.window?.setLayout(
+            (screenWidth / 2).coerceIn(minOf(PERMISSION_DIALOG_MIN_WIDTH_PX, screenWidth), screenWidth),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+    }
+
+    private fun onLocationPermissionGranted() {
+        if (gateway == null) startVehicleGateway()
+        else gateway?.onPermissionsUpdated()
     }
 
     override fun onRequestPermissionsResult(
@@ -157,9 +231,27 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PERMISSIONS) {
-            if (gateway == null) startVehicleGateway()
-            else gateway?.onPermissionsUpdated()
+        if (requestCode != REQUEST_PERMISSIONS) return
+        val askedLocation = Manifest.permission.ACCESS_FINE_LOCATION in permissions
+        when {
+            hasLocationPermission() -> {
+                onLocationPermissionGranted()
+                if (askedLocation) toast(R.string.location_permission_granted_toast)
+            }
+            // 거부 후 설명을 보여줄 수 없는 상태 = "다시 묻지 않음". 설정에서만 켤 수 있다.
+            !shouldShowRequestPermissionRationale(Manifest.permission.ACCESS_FINE_LOCATION) -> showLocationSettingsDialog()
+            else -> toast(R.string.location_permission_denied_toast)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (awaitingSettingsReturn) {
+            awaitingSettingsReturn = false
+            if (hasLocationPermission()) {
+                onLocationPermissionGranted()
+                toast(R.string.location_permission_granted_toast)
+            }
         }
     }
 
@@ -182,6 +274,7 @@ class MainActivity : AppCompatActivity() {
         evClient.close()
         routeClient.close()
         if (::osmClient.isInitialized) osmClient.close()
+        if (::buildingNameClient.isInitialized) buildingNameClient.close()
         super.onDestroy()
     }
 
@@ -248,7 +341,7 @@ class MainActivity : AppCompatActivity() {
             zoomOutButton.isEnabled = map.canZoomOut
             viewButton.setText(if (map.zoomGoal >= CLOSE_VIEW_THRESHOLD) R.string.view_overview else R.string.view_close)
         }
-        // 기본 배율(0단계)에서 시작해 핀치줌/핀치아웃을 각각 최대 5번씩 할 수 있게 한다.
+        // 기본 배율(0단계)에서 시작해 핀치줌/핀치아웃을 각각 최대 2번씩 할 수 있게 한다.
         map.setZoomNow(GoMapView.DEFAULT_ZOOM)
         demoButton.setOnClickListener { toggleDemo() }
         findViewById<View>(R.id.backButton).setOnClickListener { selectStation(null) }
@@ -332,7 +425,6 @@ class MainActivity : AppCompatActivity() {
             demoDriving = true
             map.setRoute(next)
             map.followHeading = true
-            map.zoomTo(CLOSE_ZOOM)
             render()
         }
         render()
@@ -491,12 +583,21 @@ class MainActivity : AppCompatActivity() {
                 sceneRetryAt = SystemClock.elapsedRealtime() + SCENE_RETRY_MS
             } else {
                 map.setScene(scene)
+                currentScene = scene
+                refreshBuildingNames()
                 if (center.distanceTo(car) >= SCENE_REFRESH_METERS) {
                     refreshScene(SystemClock.elapsedRealtime())
                 }
             }
         }
         // 전기차 충전소만 표시한다. 편의점/카페/음식점 등 주변 시설은 조회하지 않는다.
+    }
+
+    /** 차 주변 건물 이름을 TMAP에서 받아 지붕 위에 붙인다. 받는 중이거나 더 물을 건물이 없으면 바로 끝난다. */
+    private fun refreshBuildingNames() {
+        val scene = currentScene ?: return
+        if (!::buildingNameClient.isInitialized) return
+        buildingNameClient.lookupNear(scene, car) { refreshBuildingNames() }
     }
 
     /** 실시간 모드에서 1분마다 바뀐 충전기 상태를 받아 반영한다. */
@@ -568,6 +669,7 @@ class MainActivity : AppCompatActivity() {
         refreshStations()
         refreshLiveStatus(lastPanelAt)
         refreshScene(lastPanelAt)
+        refreshBuildingNames()
         renderAmbience()
         val stations = network.stations()
         val reservation = network.reservation()
@@ -737,6 +839,7 @@ class MainActivity : AppCompatActivity() {
             "pleos.car.permission.FUSED_LOCATION",
         )
         const val REQUEST_PERMISSIONS = 1
+        const val PERMISSION_DIALOG_MIN_WIDTH_PX = 900
 
         /** GPS 수신 전 사용할 기본 위치 (서울시청). */
         val DEFAULT_POSITION = GeoPoint(37.5663, 126.9779)

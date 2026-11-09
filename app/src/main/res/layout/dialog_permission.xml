@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 위치 권한 안내 팝업. 차량 화면에서 읽기 쉽도록 앱 패널과 같은 글자 크기·색을 쓴다. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_card"
+    android:orientation="vertical"
+    android:padding="48dp">
+
+    <TextView
+        android:id="@+id/permissionTitle"
+        style="@style/Heading"
+        android:text="@string/location_permission_title" />
+
+    <TextView
+        android:id="@+id/permissionMessage"
+        style="@style/Body"
+        android:layout_marginTop="20dp"
+        android:lineSpacingExtra="6dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="28dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/permissionLater"
+            style="@style/SecondaryButton"
+            android:layout_width="0dp"
+            android:layout_height="104dp"
+            android:layout_marginTop="0dp"
+            android:layout_marginEnd="20dp"
+            android:layout_weight="1"
+            android:text="@string/location_permission_later" />
+
+        <Button
+            android:id="@+id/permissionAllow"
+            style="@style/ActionButton"
+            android:layout_width="0dp"
+            android:layout_marginTop="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+</LinearLayout>

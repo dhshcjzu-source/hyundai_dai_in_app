@@ -60,6 +60,14 @@ class GoMapView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER
         isFakeBoldText = true
     }
+    /** 건물 이름 글자 테두리. 티맵 내비처럼 상자 없이 글자만 보이도록 흰 외곽선을 두른다. */
+    private val labelHalo = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        isFakeBoldText = true
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        color = Color.WHITE
+    }
     private val path = Path()
     private val carModel = CarModel()
     private val oval = RectF()
@@ -113,6 +121,12 @@ class GoMapView @JvmOverloads constructor(
     private var clipXs = FloatArray(128)
     private var clipYs = FloatArray(128)
     private var buildingOrder = IntArray(0)
+    private val buildingLabels = ArrayList<BuildingLabel>()
+    /** 차가 달리고 있는 도로의 실제 폭(미터). 차 크기의 기준이다. */
+    private var carRoadMeters = DEFAULT_CAR_ROAD_METERS
+    private var carRoadCheckedAt: GeoPoint? = null
+    private var carRoadScene: MapScene? = null
+    private val placedLabels = ArrayList<RectF>()
     private var buildingDepth = FloatArray(0)
     private var routeProgress = 0.0
 
@@ -386,6 +400,7 @@ class GoMapView @JvmOverloads constructor(
         val time = (System.currentTimeMillis() % 86_400_000L) / 1000f
         canvas.drawColor(look.ground)
         drawBackground(canvas, position, look, time)
+        updateCarRoad(position)
         followCarHeading()
         drawRangeRing(canvas, look, time)
         drawRoute(canvas, position)
@@ -511,6 +526,7 @@ class GoMapView @JvmOverloads constructor(
         val cameraY = -CAMERA_BACK / zoom
         val wall = tint(WALL_COLOR, look.carTint)
         val roof = tint(ROOF_COLOR, look.carTint)
+        buildingLabels.clear()
         for (index in order) {
             if (buildingDepth[index] < nearY + 100f || buildingDepth[index] > far) continue
             val building = real.buildings[index]
@@ -531,6 +547,7 @@ class GoMapView @JvmOverloads constructor(
                 val length = hypot(normalX, normalY).coerceAtLeast(0.001f)
                 val light = 0.72f + 0.28f * ((normalX * LIGHT_X + normalY * LIGHT_Y) / length).coerceIn(-1f, 1f)
                 fill.color = shadeColor(wall, light)
+                fill.alpha = BUILDING_ALPHA
                 path.rewind()
                 path.moveTo(screenX(ax, ay), screenY(ay))
                 path.lineTo(screenX(bx, by), screenY(by))
@@ -547,10 +564,59 @@ class GoMapView @JvmOverloads constructor(
             }
             path.close()
             fill.color = roof
+            fill.alpha = BUILDING_ALPHA
             canvas.drawPath(path, fill)
             stroke.color = shadeColor(wall, 0.6f)
+            stroke.alpha = BUILDING_EDGE_ALPHA
             stroke.strokeWidth = 1.5f * unit
             canvas.drawPath(path, stroke)
+            building.tmapName?.let { name -> collectBuildingLabel(building, name, height, east, north) }
+        }
+        fill.alpha = 255
+        stroke.alpha = 255
+        drawBuildingLabels(canvas)
+    }
+
+    private class BuildingLabel(val name: String, val x: Float, val y: Float, val depth: Float, val scale: Float)
+
+    /** 이름이 있는 건물의 지붕 중심 화면 위치를 모아 둔다. 가까운 건물만 이름을 붙인다. */
+    private fun collectBuildingLabel(building: MapScene.Building, name: String, height: Float, east: Float, north: Float) {
+        val dx = building.centerEast - east
+        val dy = building.centerNorth - north
+        if (hypot(dx, dy) > BUILDING_LABEL_METERS) return
+        val x = toViewX(dx, dy) - panRight
+        val y = toViewY(dx, dy) - panForward
+        if (y < nearY + 50f || nearHorizon(y)) return
+        buildingLabels += BuildingLabel(name, screenX(x, y), screenYAt(y, height), y, depthScale(y))
+    }
+
+    /**
+     * 건물 이름을 지붕 위에 그린다. 가까운 건물부터 놓고, 이미 놓은 이름과 겹치거나
+     * 같은 이름(캠퍼스처럼 여러 동이 한 이름)이 있으면 건너뛴다.
+     */
+    private fun drawBuildingLabels(canvas: Canvas) {
+        if (buildingLabels.isEmpty()) return
+        buildingLabels.sortBy { it.depth }
+        placedLabels.clear()
+        val drawn = HashSet<String>()
+        for (label in buildingLabels) {
+            if (placedLabels.size >= MAX_BUILDING_LABELS) break
+            if (label.name in drawn) continue
+            text.textSize = max(18f * unit, 24f * unit * label.scale)
+            val halo = text.textSize * 0.18f
+            val half = text.measureText(label.name) / 2 + halo
+            val baseline = label.y - 6f * unit
+            val rect = RectF(label.x - half, baseline - text.textSize - halo, label.x + half, baseline + text.textSize * 0.25f + halo)
+            // 화면 가장자리에 걸려 잘리는 이름은 그리지 않는다.
+            if (rect.top < 0f || rect.bottom > height || rect.left < 0f || rect.right > width) continue
+            if (placedLabels.any { RectF.intersects(it, rect) }) continue
+            placedLabels += rect
+            drawn += label.name
+            labelHalo.textSize = text.textSize
+            labelHalo.strokeWidth = halo * 2
+            canvas.drawText(label.name, label.x, baseline, labelHalo)
+            text.color = BUILDING_LABEL_COLOR
+            canvas.drawText(label.name, label.x, baseline, text)
         }
     }
 
@@ -1001,13 +1067,55 @@ class GoMapView @JvmOverloads constructor(
     private val roadScale get() = 1f + (ROAD_WIDTH_SCALE - 1f) * exaggeration
 
     /**
+     * 차 바로 아래 도로를 찾아 그 폭을 [carRoadMeters]에 담는다. 매 프레임 찾으면 무거우므로
+     * 차가 [CAR_ROAD_RECHECK_METERS] 이상 움직였거나 지도가 바뀌었을 때만 다시 찾는다.
+     */
+    private fun updateCarRoad(position: GeoPoint) {
+        val real = scene
+        if (real == null) {
+            carRoadMeters = DEFAULT_CAR_ROAD_METERS
+            return
+        }
+        val last = carRoadCheckedAt
+        if (real === carRoadScene && last != null && last.distanceTo(position) < CAR_ROAD_RECHECK_METERS) return
+        carRoadScene = real
+        carRoadCheckedAt = position
+        val (offsetEast, offsetNorth) = position.metersFrom(real.origin)
+        val px = offsetEast.toFloat()
+        val py = offsetNorth.toFloat()
+        var best = CAR_ROAD_SEARCH_METERS
+        var width = DEFAULT_CAR_ROAD_METERS
+        for (road in real.roads) {
+            for (i in 0 until road.east.size - 1) {
+                val distance = segmentDistance(px, py, road.east[i], road.north[i], road.east[i + 1], road.north[i + 1])
+                // 도로 가장자리까지의 거리로 비교해야 넓은 도로 위에 있을 때 옆 골목을 잡지 않는다.
+                val edge = distance - road.widthMeters / 2
+                if (edge < best) {
+                    best = edge
+                    width = road.widthMeters
+                }
+            }
+        }
+        // 골목, 주차장 길처럼 좁은 길에서는 차가 주변 도로보다 작아 보이므로 일반 2차로 폭 아래로는 줄이지 않는다.
+        carRoadMeters = max(width, DEFAULT_CAR_ROAD_METERS)
+    }
+
+    private fun segmentDistance(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val dx = bx - ax
+        val dy = by - ay
+        val lengthSquared = dx * dx + dy * dy
+        val t = if (lengthSquared == 0f) 0f else (((px - ax) * dx + (py - ay) * dy) / lengthSquared).coerceIn(0f, 1f)
+        return hypot(px - (ax + t * dx), py - (ay + t * dy))
+    }
+
+    /**
      * 내 차량의 화면상 1미터당 픽셀 수.
-     * 차 위치에서 그려지는 주요 도로(폭 [REFERENCE_ROAD_METERS]) 폭보다 [CAR_OVER_ROAD]배 넓게 보이도록 맞춘다.
+     * 차가 달리는 도로([carRoadMeters]) 폭보다 [CAR_OVER_ROAD]배 넓게 보이도록 맞춘다.
      * 도로와 같은 방식으로 계산하므로 확대/축소해도 도로 대비 크기가 유지된다.
      */
     private val carPixelsPerMeter: Float
         get() {
-            val roadPixels = REFERENCE_ROAD_METERS * roadScale * pixelsPerMeter(max(-panForward, nearY / 2))
+            val roadPixels = carRoadMeters * roadScale * pixelsPerMeter(max(-panForward, nearY / 2))
             return roadPixels * CAR_OVER_ROAD / CAR_WIDTH_METERS
         }
 
@@ -1168,10 +1276,13 @@ class GoMapView @JvmOverloads constructor(
         private const val MARKER_RADIUS = 62f
         private const val MIN_HIT_RADIUS = 76f
         private const val CAR_PIXELS_PER_METER = 56f
-        /** 차 크기의 기준이 되는 도로 폭(미터). OSM primary 도로 폭과 같다. */
-        private const val REFERENCE_ROAD_METERS = 16f
-        /** 차 폭을 기준 도로 폭보다 이만큼 크게 그린다. */
-        private const val CAR_OVER_ROAD = 1.2f
+        /** 주변 도로를 모를 때(실제 지도 받기 전, 도로 밖) 차 크기 기준 도로 폭(미터). 일반 2차로 폭. */
+        private const val DEFAULT_CAR_ROAD_METERS = 8f
+        /** 차 폭을 차가 달리는 도로 폭보다 이만큼만 크게 그린다. */
+        private const val CAR_OVER_ROAD = 1.15f
+        /** 이 거리(도로 가장자리 기준) 안에 도로가 없으면 [DEFAULT_CAR_ROAD_METERS]를 쓴다. */
+        private const val CAR_ROAD_SEARCH_METERS = 25f
+        private const val CAR_ROAD_RECHECK_METERS = 8.0
         /** 차 모델의 실제 폭(미터). CarModel의 최대 반폭 0.955 × 2. */
         private const val CAR_WIDTH_METERS = 1.91f
         private const val MAX_PAN = 5_000f
@@ -1187,6 +1298,13 @@ class GoMapView @JvmOverloads constructor(
         private const val FULL_EXAGGERATION_ZOOM = 2f
         private const val ROUTE_METERS = 4f
         private const val BUILDING_FAR_METERS = 2_500f
+        /** 건물 벽·지붕 불투명도(0~255). 뒤쪽 도로와 표식이 비쳐 보이도록 반투명하게 그린다. */
+        private const val BUILDING_ALPHA = 150
+        private const val BUILDING_EDGE_ALPHA = 200
+        /** 차에서 이 거리 안의 건물에만 이름을 붙인다. */
+        private const val BUILDING_LABEL_METERS = 450f
+        private const val MAX_BUILDING_LABELS = 14
+        private val BUILDING_LABEL_COLOR = Color.rgb(40, 44, 52)
         private const val BUILDING_HEIGHT_SCALE = 4f
         private const val FACILITY_RADIUS = 20f
         private const val FACILITY_LABEL_METERS = 350.0
@@ -1206,10 +1324,10 @@ class GoMapView @JvmOverloads constructor(
         private val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
         private val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
         private const val RECENTER_ANIMATION_MS = 280L
-        /** 기본 상태(0단계)에서 핀치줌/핀치아웃 각각 최대 5번씩만 가능하도록 제한한다. */
-        const val MAX_ZOOM_STEPS = 5
-        /** 기본 상태(0단계)에서 줌아웃은 최대 3번까지만 가능하다. */
-        const val MAX_ZOOM_OUT_STEPS = 3
+        /** 기본 상태(0단계)에서 줌인은 최대 2번까지만 가능하다. */
+        const val MAX_ZOOM_STEPS = 2
+        /** 기본 상태(0단계)에서 줌아웃은 최대 2번까지만 가능하다. */
+        const val MAX_ZOOM_OUT_STEPS = 2
         const val DEFAULT_ZOOM = 8f
         const val ZOOM_STEP = 1.6f
         private const val PINCH_STEP_THRESHOLD = 1.05f

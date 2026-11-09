@@ -46,17 +46,17 @@ class GoMapViewZoomTest {
     }
 
     @Test
-    fun zoomStopsAtFiveStepsInAndThreeStepsOut() = onMain {
-        repeat(7) { pinch(fromSpan = 200f, toSpan = 1000f) }
-        assertEquals(5, map.zoomStep)
+    fun zoomStopsAtTwoStepsInAndTwoStepsOut() = onMain {
+        repeat(4) { pinch(fromSpan = 200f, toSpan = 1000f) }
+        assertEquals(2, map.zoomStep)
         assertEquals(GoMapView.MAX_ZOOM, map.zoom, 0.01f)
 
-        repeat(5) { pinch(fromSpan = 1000f, toSpan = 200f) }
+        repeat(2) { pinch(fromSpan = 1000f, toSpan = 200f) }
         assertEquals(0, map.zoomStep)
         assertEquals(GoMapView.DEFAULT_ZOOM, map.zoom, 0.01f)
 
-        repeat(7) { pinch(fromSpan = 1000f, toSpan = 200f) }
-        assertEquals(-3, map.zoomStep)
+        repeat(4) { pinch(fromSpan = 1000f, toSpan = 200f) }
+        assertEquals(-2, map.zoomStep)
         assertEquals(GoMapView.MIN_ZOOM, map.zoom, 0.01f)
     }
 

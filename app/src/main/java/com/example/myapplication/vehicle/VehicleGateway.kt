@@ -41,9 +41,8 @@ class VehicleGateway(
     private var systemRegistered = false
     private var stopped = false
 
-    /** 에뮬레이터 초기 기본값(서울시청 고정값)이 아닌 실제/이동 GPS 신호를 받았는지 여부. */
+    /** GPS 신호를 한 번이라도 받았는지 여부. 받은 뒤로는 네트워크(IP) 위치를 쓰지 않는다. */
     private var hasActiveGpsSignal = false
-    private var initialEmulatorDefaultFix: GeoPoint? = null
     private var latestGpsPoint: GeoPoint? = null
     private var latestNetworkPoint: GeoPoint? = null
     private var lastNetworkFetchAt = 0L
@@ -104,8 +103,16 @@ class VehicleGateway(
         handler.postDelayed(batteryPoll, SERVICE_CONNECT_DELAY_MS)
     }
 
+    /** 위치 권한을 새로 받았을 때 호출한다. 권한 없이 실패했던 GPS 구독을 다시 건다. */
     fun onPermissionsUpdated() {
         registerSystemLocation()
+        if (fusedConnected) {
+            guarded("위치 재구독") {
+                fusedLocation.unregisterFusedLocationCallback(locationListener)
+                fusedLocation.registerFusedLocationCallback(locationListener)
+                fusedLocation.getLastKnownLocation(locationListener)
+            }
+        }
         pollLocation()
     }
 
@@ -152,24 +159,16 @@ class VehicleGateway(
             registerSystemLocation()
             val manager = locationManager
             if (manager != null) {
-                var bestNonDefault: Location? = null
-                var bestAny: Location? = null
+                var latest: Location? = null
                 val providers = runCatching { manager.allProviders }.getOrNull().orEmpty()
                 for (provider in providers) {
                     val candidate = runCatching { manager.getLastKnownLocation(provider) }.getOrNull() ?: continue
                     if (candidate.latitude == 0.0 && candidate.longitude == 0.0) continue
-                    val point = GeoPoint(candidate.latitude, candidate.longitude)
-                    if (!isStaticEmulatorDefault(point)) {
-                        if (bestNonDefault == null || candidate.elapsedRealtimeNanos > bestNonDefault.elapsedRealtimeNanos) {
-                            bestNonDefault = candidate
-                        }
-                    }
-                    if (bestAny == null || candidate.elapsedRealtimeNanos > bestAny.elapsedRealtimeNanos) {
-                        bestAny = candidate
+                    if (latest == null || candidate.elapsedRealtimeNanos > latest.elapsedRealtimeNanos) {
+                        latest = candidate
                     }
                 }
-                val chosen = bestNonDefault ?: bestAny
-                chosen?.let {
+                latest?.let {
                     onGpsCandidate(GeoPoint(it.latitude, it.longitude), "Poll:${it.provider}")
                 }
             }
@@ -186,38 +185,16 @@ class VehicleGateway(
     }
 
     private fun onGpsCandidate(point: GeoPoint, sourceName: String) {
-        if (!isStaticEmulatorDefault(point)) {
-            val now = SystemClock.elapsedRealtime()
-            val fromFused = sourceName == "PleosFused"
-            // 시스템 GPS가 살아 있으면 Fused 값과 번갈아 쓰지 않는다. 번갈아 쓰면 이동 중 차가 앞뒤로 튄다.
-            if (fromFused && now - lastSystemGpsAt < SYSTEM_GPS_PRIORITY_MS) return
-            if (!fromFused) lastSystemGpsAt = now
-            hasActiveGpsSignal = true
-            if (point == latestGpsPoint) return
-            latestGpsPoint = point
-            Log.d(TAG, "활성 GPS 수신($sourceName): ${point.latitude}, ${point.longitude}")
-            reportLocation(point)
-        } else if (latestNetworkPoint == null && SystemClock.elapsedRealtime() - lastNetworkFetchAt > NETWORK_FALLBACK_TIMEOUT_MS) {
-            // 네트워크 위치 조회도 실패한 경우에만 에뮬레이터 기본 좌표를 사용한다.
-            latestGpsPoint = point
-            reportLocation(point)
-        }
-    }
-
-    /**
-     * 에뮬레이터의 초기 고정 좌표(서울시청 부근)인지 판별한다.
-     * 단, 초기 좌표에서 1m 이상 실제로 움직이기 시작하면 실제 주행 GPS 신호로 인정한다.
-     */
-    private fun isStaticEmulatorDefault(point: GeoPoint): Boolean {
-        if (point.distanceTo(EMULATOR_DEFAULT_SEOUL) > EMULATOR_DEFAULT_RADIUS_METERS) {
-            return false
-        }
-        val first = initialEmulatorDefaultFix
-        if (first == null) {
-            initialEmulatorDefaultFix = point
-            return true
-        }
-        return point.distanceTo(first) < MIN_GPS_MOVEMENT_METERS
+        val now = SystemClock.elapsedRealtime()
+        val fromFused = sourceName == "PleosFused"
+        // 시스템 GPS가 살아 있으면 Fused 값과 번갈아 쓰지 않는다. 번갈아 쓰면 이동 중 차가 앞뒤로 튄다.
+        if (fromFused && now - lastSystemGpsAt < SYSTEM_GPS_PRIORITY_MS) return
+        if (!fromFused) lastSystemGpsAt = now
+        hasActiveGpsSignal = true
+        if (point == latestGpsPoint) return
+        latestGpsPoint = point
+        Log.d(TAG, "활성 GPS 수신($sourceName): ${point.latitude}, ${point.longitude}")
+        reportLocation(point)
     }
 
     private fun fetchNetworkLocationIfNeeded(force: Boolean) {
@@ -318,10 +295,5 @@ class VehicleGateway(
         /** 시스템 GPS가 이 시간 안에 들어왔으면 Pleos Fused 값보다 우선한다(소스 간 위치 튐 방지). */
         private const val SYSTEM_GPS_PRIORITY_MS = 3_000L
         private const val NETWORK_REFRESH_INTERVAL_MS = 3_000L
-        private const val NETWORK_FALLBACK_TIMEOUT_MS = 4_000L
-        private const val EMULATOR_DEFAULT_RADIUS_METERS = 300.0
-        private const val MIN_GPS_MOVEMENT_METERS = 1.0
-        /** 에뮬레이터 초기 고정 위치(서울시청). */
-        private val EMULATOR_DEFAULT_SEOUL = GeoPoint(37.5665, 126.9780)
     }
 }
