@@ -45,7 +45,9 @@ class TmapRouteClient(private val appKey: String) {
             .put("endY", end.latitude.toString())
             .put("reqCoordType", "WGS84GEO")
             .put("resCoordType", "WGS84GEO")
+            // 0: 교통최적+추천. trafficInfo=Y면 구간별 실시간 혼잡도가 함께 온다.
             .put("searchOption", "0")
+            .put("trafficInfo", "Y")
             .toString()
         val connection = URL("https://apis.openapi.sk.com/tmap/routes?version=1").openConnection() as HttpURLConnection
         try {
@@ -69,17 +71,27 @@ class TmapRouteClient(private val appKey: String) {
         private const val TIMEOUT_MS = 10_000
         private const val START_POINT = "S"
         private const val END_POINT = "E"
+        private const val MIN_SPEED_SEGMENT_METERS = 150.0
+        /** TMAP roadType. 0 고속국도, 1 도시고속화도로, 2 국도 … 7 주요도로3, 8 이상은 골목길 등 기타도로. */
+        private const val ROAD_HIGHWAY = 0
+        private const val ROAD_URBAN_HIGHWAY = 1
+        private const val ROAD_NATIONAL = 2
+        private const val ROAD_MAJOR_3 = 7
 
         /** GeoJSON 형태의 응답에서 점은 안내로, 선은 경로 모양으로 쓴다. */
         fun parseRoute(json: String): NavRoute {
             val features = JSONObject(json).getJSONArray("features")
             val points = ArrayList<GeoPoint>()
             val raw = ArrayList<NavRoute.RawGuidance>()
+            val congestion = ArrayList<Int>()
             var totalSeconds = 0
 
-            fun add(coordinate: JSONArray) {
+            /** 점을 붙인다. 새 점이 생기면 그 앞 구간의 혼잡도로 [level]을 기록한다. */
+            fun add(coordinate: JSONArray, level: Int) {
                 val point = GeoPoint(coordinate.getDouble(1), coordinate.getDouble(0))
-                if (points.lastOrNull() != point) points += point
+                if (points.lastOrNull() == point) return
+                points += point
+                if (points.size >= 2) congestion += level
             }
 
             for (i in 0 until features.length()) {
@@ -90,7 +102,7 @@ class TmapRouteClient(private val appKey: String) {
                 val coordinates = geometry.getJSONArray("coordinates")
                 when (geometry.getString("type")) {
                     "Point" -> {
-                        add(coordinates)
+                        add(coordinates, NavRoute.CONGESTION_UNKNOWN)
                         val pointType = properties.optString("pointType")
                         if (pointType == START_POINT) continue
                         val arrival = pointType == END_POINT || properties.optInt("turnType") == 201
@@ -102,10 +114,58 @@ class TmapRouteClient(private val appKey: String) {
                         )
                     }
 
-                    "LineString" -> for (j in 0 until coordinates.length()) add(coordinates.getJSONArray(j))
+                    "LineString" -> {
+                        val levels = lineCongestion(properties, coordinates.length())
+                        for (j in 0 until coordinates.length()) {
+                            add(coordinates.getJSONArray(j), if (j == 0) NavRoute.CONGESTION_UNKNOWN else levels[j - 1])
+                        }
+                    }
                 }
             }
-            return NavRoute.of(points, raw, totalSeconds)
+            return NavRoute.of(points, raw, totalSeconds, congestion.toIntArray())
+        }
+
+        /**
+         * 선 하나의 구간별 혼잡도.
+         * TMAP이 "traffic"([시작 좌표 번호, 끝 좌표 번호, 혼잡도, 속도] 목록)을 주면 그대로 쓴다.
+         * 주지 않으면(앱 키 요금제에 따라 빠진다) 실시간 교통이 반영된 "time"과 "distance"로 속도를 구해 판정한다.
+         */
+        private fun lineCongestion(properties: JSONObject, coordinateCount: Int): IntArray {
+            val levels = IntArray(maxOf(0, coordinateCount - 1))
+            val traffic = properties.optJSONArray("traffic")
+            if (traffic == null) {
+                levels.fill(congestionFromSpeed(properties))
+                return levels
+            }
+            for (k in 0 until traffic.length()) {
+                val item = traffic.optJSONArray(k) ?: continue
+                if (item.length() < 3) continue
+                val level = item.optInt(2).coerceIn(NavRoute.CONGESTION_UNKNOWN, NavRoute.CONGESTION_JAM)
+                for (s in item.optInt(0).coerceAtLeast(0) until item.optInt(1).coerceAtMost(levels.size)) levels[s] = level
+            }
+            return levels
+        }
+
+        /**
+         * 서울시 교통정보(TOPIS) 소통 기준으로 구간 속도를 혼잡도로 바꾼다.
+         * 도시고속도로·고속도로는 30/70km/h, 일반도로는 15/25km/h, 골목길은 8/15km/h를 경계로 쓴다.
+         * 짧은 구간은 신호·회전 대기 때문에 속도가 들쭉날쭉하므로 판정하지 않는다.
+         */
+        fun congestionFromSpeed(properties: JSONObject): Int {
+            val meters = properties.optDouble("distance", 0.0)
+            val seconds = properties.optDouble("time", 0.0)
+            if (meters < MIN_SPEED_SEGMENT_METERS || seconds <= 0.0) return NavRoute.CONGESTION_UNKNOWN
+            val kmh = meters / seconds * 3.6
+            val (jam, slow) = when (properties.optInt("roadType", -1)) {
+                ROAD_HIGHWAY, ROAD_URBAN_HIGHWAY -> 30.0 to 70.0
+                in ROAD_NATIONAL..ROAD_MAJOR_3 -> 15.0 to 25.0
+                else -> 8.0 to 15.0
+            }
+            return when {
+                kmh < jam -> NavRoute.CONGESTION_JAM
+                kmh < slow -> NavRoute.CONGESTION_SLOW
+                else -> NavRoute.CONGESTION_SMOOTH
+            }
         }
 
         /** "교차로에서 좌회전 후 대구대로를 따라 320m 이동"에서 앞부분만 남긴다. */

@@ -75,6 +75,43 @@ class NavRouteTest {
     }
 
     @Test
+    fun `parses live traffic congestion per segment`() {
+        // 첫 선: 원활(0→1), 정체(1→2). 둘째 선: 서행. 셋째 선: 교통 정보 없음.
+        val json = """
+            {"type":"FeatureCollection","features":[
+              {"type":"Feature","geometry":{"type":"Point","coordinates":[128.85,35.9]},
+               "properties":{"totalTime":300,"pointType":"S"}},
+              {"type":"Feature","geometry":{"type":"LineString","coordinates":[[128.85,35.9],[128.85,35.901],[128.85,35.902]]},
+               "properties":{"traffic":[[0,1,1,50],[1,2,4,5]]}},
+              {"type":"Feature","geometry":{"type":"LineString","coordinates":[[128.85,35.902],[128.851,35.902]]},
+               "properties":{"traffic":[[0,1,2,20]]}},
+              {"type":"Feature","geometry":{"type":"LineString","coordinates":[[128.851,35.902],[128.852,35.902]]},
+               "properties":{}},
+              {"type":"Feature","geometry":{"type":"Point","coordinates":[128.852,35.902]},
+               "properties":{"pointType":"E"}}
+            ]}
+        """.trimIndent()
+        val parsed = TmapRouteClient.parseRoute(json)
+        assertEquals(300, parsed.totalSeconds)
+        assertEquals(
+            listOf(NavRoute.CONGESTION_SMOOTH, NavRoute.CONGESTION_JAM, NavRoute.CONGESTION_SLOW, NavRoute.CONGESTION_UNKNOWN),
+            parsed.congestion.toList(),
+        )
+    }
+
+    @Test
+    fun `derives congestion from live segment speed when traffic is missing`() {
+        fun level(roadType: Int, meters: Int, seconds: Int) = TmapRouteClient.congestionFromSpeed(
+            org.json.JSONObject().put("roadType", roadType).put("distance", meters).put("time", seconds),
+        )
+        assertEquals(NavRoute.CONGESTION_SMOOTH, level(5, 1000, 100)) // 36km/h
+        assertEquals(NavRoute.CONGESTION_SLOW, level(5, 1000, 180)) // 20km/h
+        assertEquals(NavRoute.CONGESTION_JAM, level(5, 1000, 300)) // 12km/h
+        assertEquals(NavRoute.CONGESTION_SLOW, level(0, 1000, 72)) // 고속도로 50km/h
+        assertEquals(NavRoute.CONGESTION_UNKNOWN, level(5, 50, 30)) // 짧은 구간은 판정 안 함
+    }
+
+    @Test
     fun `falls back to a straight line`() {
         val straight = NavRoute.straight(start, corner)
         assertEquals(200.0, straight.totalMeters, 1.0)

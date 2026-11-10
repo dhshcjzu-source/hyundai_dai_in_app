@@ -151,6 +151,46 @@ class SimulatedChargingNetworkTest {
     }
 
     @Test
+    fun `start time is the later of arrival and the charger becoming free`() {
+        val station = com.example.myapplication.model.Station(
+            "s", "s", origin,
+            listOf(
+                // 10분 뒤 끝나지만 다른 사람 예약(30분)이 기다리고 있다 → 40분 뒤 사용 가능
+                com.example.myapplication.model.Charger(1, 600, false, othersQueueSeconds = listOf(1_800)),
+                // 20분 뒤 끝나고 예약 없음
+                com.example.myapplication.model.Charger(2, 1_200, false),
+            ),
+        )
+        assertEquals(1, station.othersReservedCount)
+        assertEquals(2, station.nextReservableCharger!!.number)
+        assertEquals(1_200, station.startInSeconds(300)) // 5분 만에 도착해도 20분 기다린다
+        assertEquals(1_800, station.startInSeconds(1_800)) // 30분 걸리면 도착 즉시
+    }
+
+    @Test
+    fun `queued reservations charge before me and delay my turn`() {
+        val busy = StationPlan("q", "q", 0.0, 0.0, total = 1, occupied = 1, remainingSeconds = listOf(600))
+        val network = SimulatedChargingNetwork(
+            origin, listOf(busy), Random(1), arrivalChancePerMinute = 0.0, othersReservationChance = 1.0,
+        )
+        val charger = network.station("q").chargers[0]
+        assertTrue(charger.othersReserved >= 1)
+        val result = network.reserve("q", origin) as ReserveResult.Success
+        assertEquals(charger.availableInMinutes, result.reservation.waitMinutes)
+
+        // 앞 차가 끝나면 다른 사람 예약이 이어서 충전한다
+        network.advance(600)
+        val after = network.station("q").chargers[0]
+        assertTrue(after.isCharging)
+        assertEquals(charger.othersQueueSeconds.first(), after.remainingSeconds)
+    }
+
+    @Test
+    fun `no other reservations unless enabled`() {
+        assertEquals(0, network().stations().sumOf { it.othersReservedCount })
+    }
+
+    @Test
     fun `live plans use given remaining times and apply status updates`() {
         val live = StationPlan(
             "ev-1", "실시간", 0.0, 300.0, total = 2, occupied = 1,

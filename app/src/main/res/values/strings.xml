@@ -42,11 +42,18 @@
     <string name="back">← 목록</string>
     <string name="distance_m">%1$d m</string>
     <string name="distance_km">%1$.1f km</string>
+    <string name="eta_live">%1$s · %2$d분</string>
+    <string name="eta_estimate">%1$s · 약 %2$d분(추정)</string>
     <string name="charging_count">충전 중 %1$d / %2$d대</string>
     <string name="next_free_now">지금 %1$d자리 비어 있음</string>
     <string name="next_free_in">다음 자리까지 %1$d분</string>
     <string name="in_range">예약 가능</string>
-    <string name="list_summary">빈자리 %1$d대 · 가까운 순</string>
+    <string name="list_summary">충전 시작 빠른 순 · 1위 %1$d분 뒤</string>
+    <string name="status_ready_on_arrival">도착 즉시 충전</string>
+    <string name="status_wait_on_arrival">도착 후 %1$d분 대기</string>
+    <string name="status_unavailable">충전기 없음</string>
+    <string name="charging_with_reservations">%1$s · 예약 %2$d건(가상)</string>
+    <string name="charger_charging_queued">충전 중 %1$d분 · 예약 %2$d건(가상) · %3$d분 뒤 사용 가능</string>
     <string name="status_free">빈자리 %1$d</string>
     <string name="status_wait">%1$d분 대기</string>
 

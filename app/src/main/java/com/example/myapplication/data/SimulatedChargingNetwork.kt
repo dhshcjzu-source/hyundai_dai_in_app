@@ -21,6 +21,12 @@ class SimulatedChargingNetwork(
     seedPlans: List<StationPlan> = DEFAULT_PLANS,
     private val random: Random = Random(7),
     private val arrivalChancePerMinute: Double = 0.15,
+    /**
+     * 충전 중인 충전기에 다른 사람 예약이 걸려 있을 확률. 0이면 다른 사람 예약을 만들지 않는다.
+     * 실제 예약 목록을 주는 공개 API가 없어 가상으로 만든다. 사업자 예약 API가 생기면 그 값으로 바꾼다.
+     */
+    private val othersReservationChance: Double = 0.0,
+    private val reservationRandom: Random = Random(11),
 ) {
     data class StationPlan(
         val id: String,
@@ -41,6 +47,10 @@ class SimulatedChargingNetwork(
     private class SimCharger(var remainingSeconds: Int?) {
         /** 내가 시작한 충전. 실시간 상태로 덮어쓰지 않는다. */
         var mine = false
+        /** 다른 사람 예약으로 시작한 충전. 가상이므로 실시간 상태로 덮어쓰지 않는다. */
+        var fromReservation = false
+        /** 지금 충전이 끝나면 차례로 쓸 다른 사람 예약의 충전 시간(초). */
+        val othersQueue = ArrayList<Int>()
     }
 
     private class SimStation(
@@ -73,7 +83,13 @@ class SimulatedChargingNetwork(
                 )
             },
             chargerIds = plan.chargerIds,
-        )
+        ).also { station ->
+            for (charger in station.chargers) {
+                if (charger.remainingSeconds == null) continue
+                if (reservationRandom.nextDouble() < othersReservationChance) charger.othersQueue += randomSession()
+                if (reservationRandom.nextDouble() < othersReservationChance / 3) charger.othersQueue += randomSession()
+            }
+        }
     }
 
     private var reservation: SimReservation? = null
@@ -88,13 +104,16 @@ class SimulatedChargingNetwork(
                     number = index + 1,
                     remainingSeconds = charger.remainingSeconds,
                     reservedByMe = isReserved(station, index),
+                    othersQueueSeconds = charger.othersQueue.toList(),
                 )
             },
         )
     }
 
     fun reservation(): Reservation? = reservation?.let { active ->
-        val waitSeconds = active.station.chargers[active.chargerIndex].remainingSeconds ?: 0
+        val charger = active.station.chargers[active.chargerIndex]
+        // 앞선 다른 사람 예약까지 끝나야 내 차례다.
+        val waitSeconds = (charger.remainingSeconds ?: 0) + charger.othersQueue.sum()
         Reservation(
             stationId = active.station.id,
             stationName = active.station.name,
@@ -111,7 +130,7 @@ class SimulatedChargingNetwork(
         if (car.distanceTo(station.position) > RESERVE_RADIUS_METERS) return ReserveResult.TooFar
 
         val chargerIndex = station.chargers.indices
-            .minBy { station.chargers[it].remainingSeconds ?: 0 }
+            .minBy { (station.chargers[it].remainingSeconds ?: 0) + station.chargers[it].othersQueue.sum() }
         reservation = SimReservation(station, chargerIndex, HOLD_SECONDS)
         return ReserveResult.Success(reservation()!!)
     }
@@ -144,16 +163,38 @@ class SimulatedChargingNetwork(
                 when {
                     remaining != null -> {
                         charger.remainingSeconds = (remaining - seconds).takeIf { it > 0 }
-                        if (charger.remainingSeconds == null) charger.mine = false
+                        if (charger.remainingSeconds == null) {
+                            charger.mine = false
+                            charger.fromReservation = false
+                            startNextReservation(charger)
+                        }
                     }
+
+                    // 비었는데 앞선 다른 사람 예약이 있으면 그 사람이 먼저 쓴다.
+                    startNextReservation(charger) -> Unit
 
                     !isReserved(station, index) &&
                         random.nextDouble() < arrivalChancePerMinute * seconds / 60.0 ->
                         charger.remainingSeconds = randomSession()
                 }
+                // 충전 중인 자리에 새 다른 사람 예약이 들어온다. 내가 예약한 자리는 내 뒤라서 세지 않는다.
+                if (charger.remainingSeconds != null && !isReserved(station, index) &&
+                    charger.othersQueue.size < MAX_OTHERS_QUEUE &&
+                    reservationRandom.nextDouble() < othersReservationChance * NEW_RESERVATION_RATE * seconds / 60.0
+                ) {
+                    charger.othersQueue += randomSession()
+                }
             }
         }
         return advanceHold(seconds)
+    }
+
+    /** 대기 중인 다른 사람 예약이 있으면 충전을 시작시키고 true를 돌려준다. */
+    private fun startNextReservation(charger: SimCharger): Boolean {
+        if (charger.remainingSeconds != null || charger.othersQueue.isEmpty()) return false
+        charger.remainingSeconds = charger.othersQueue.removeAt(0)
+        charger.fromReservation = true
+        return true
     }
 
     /**
@@ -165,7 +206,7 @@ class SimulatedChargingNetwork(
             val index = station.chargerIds.indexOf(update.chargerId)
             if (index < 0) continue
             val charger = station.chargers[index]
-            if (charger.mine) continue
+            if (charger.mine || charger.fromReservation) continue
             charger.remainingSeconds = when {
                 update.remainingSeconds == null -> null
                 charger.remainingSeconds != null -> charger.remainingSeconds
@@ -194,6 +235,12 @@ class SimulatedChargingNetwork(
         const val ARRIVAL_RADIUS_METERS = 100.0
         const val HOLD_SECONDS = 15 * 60
         const val MY_SESSION_SECONDS = 40 * 60
+        /** 앱에서 쓰는 다른 사람 예약 확률(가상). */
+        const val DEMO_OTHERS_RESERVATION_CHANCE = 0.35
+        /** 충전기 한 대에 쌓일 수 있는 다른 사람 예약 수. */
+        private const val MAX_OTHERS_QUEUE = 2
+        /** 분당 새 예약이 들어올 확률 = [othersReservationChance] x 이 값. */
+        private const val NEW_RESERVATION_RATE = 0.05
 
         val DEFAULT_PLANS = listOf(
             StationPlan("hanbit", "한빛공원 충전소", 900.0, 500.0, total = 2, occupied = 1),

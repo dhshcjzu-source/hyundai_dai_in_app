@@ -23,6 +23,27 @@ class MapScene(
         /** TMAP 역지오코딩으로 받은 건물 이름. 받기 전이거나 이름이 없으면 null. 메인 스레드에서만 바꾼다. */
         var tmapName: String? = null
 
+        /** 아파트 동까지 붙인 이름("경산푸르지오 101동"). TMAP POI에서 동을 찾은 건물만 있다. 메인 스레드에서만 바꾼다. */
+        var dongName: String? = null
+
+        /** 지도에 붙일 이름. 동 이름이 있으면 그것을, 없으면 건물(단지) 이름을 쓴다. */
+        val label: String? get() = dongName ?: tmapName
+
+        /** 바닥 다각형 안에 (동쪽, 북쪽) 미터 좌표가 들어 있는지. */
+        fun contains(pointEast: Float, pointNorth: Float): Boolean {
+            var inside = false
+            var j = east.size - 1
+            for (i in east.indices) {
+                if ((north[i] > pointNorth) != (north[j] > pointNorth) &&
+                    pointEast < (east[j] - east[i]) * (pointNorth - north[i]) / (north[j] - north[i]) + east[i]
+                ) {
+                    inside = !inside
+                }
+                j = i
+            }
+            return inside
+        }
+
         init {
             val closed = east.size > 1 && east.first() == east.last() && north.first() == north.last()
             val count = if (closed) east.size - 1 else east.size

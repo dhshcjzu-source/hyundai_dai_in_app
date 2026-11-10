@@ -16,9 +16,11 @@ data class Guidance(
 class NavRoute private constructor(
     val points: List<GeoPoint>,
     val guidance: List<Guidance>,
-    /** 실제 도로 기준 예상 소요 시간(초). */
+    /** 실제 도로 기준 예상 소요 시간(초). TMAP 경로는 실시간 교통을 반영한 값이다. */
     val totalSeconds: Int,
     val cumulative: DoubleArray,
+    /** 구간(points[i] → points[i + 1])별 혼잡도. [CONGESTION_UNKNOWN]~[CONGESTION_JAM]. */
+    val congestion: IntArray,
 ) {
     val totalMeters: Double get() = cumulative.last()
 
@@ -56,11 +58,24 @@ class NavRoute private constructor(
     data class RawGuidance(val vertex: Int, val instruction: String, val road: String, val arrival: Boolean)
 
     companion object {
+        /** TMAP 혼잡도 값. 0 정보 없음, 1 원활, 2 서행, 3 지체, 4 정체. */
+        const val CONGESTION_UNKNOWN = 0
+        const val CONGESTION_SMOOTH = 1
+        const val CONGESTION_SLOW = 2
+        const val CONGESTION_DELAY = 3
+        const val CONGESTION_JAM = 4
+
         private const val MIN_SEGMENT_METERS = 1.0
         private const val TURN_LOOK_METERS = 8.0
 
-        fun of(points: List<GeoPoint>, raw: List<RawGuidance>, totalSeconds: Int): NavRoute {
+        fun of(
+            points: List<GeoPoint>,
+            raw: List<RawGuidance>,
+            totalSeconds: Int,
+            congestion: IntArray = IntArray(points.size - 1),
+        ): NavRoute {
             require(points.size >= 2) { "경로 점이 2개 이상 필요하다" }
+            require(congestion.size == points.size - 1) { "혼잡도는 구간 수와 같아야 한다" }
             val cumulative = DoubleArray(points.size)
             for (i in 1 until points.size) cumulative[i] = cumulative[i - 1] + points[i - 1].distanceTo(points[i])
             val guidance = raw.map { item ->
@@ -72,7 +87,7 @@ class NavRoute private constructor(
                     arrival = item.arrival,
                 )
             }
-            return NavRoute(points, guidance, totalSeconds, cumulative)
+            return NavRoute(points, guidance, totalSeconds, cumulative, congestion)
         }
 
         /** 길이 없는 경우를 위한 직선 경로. 시속 40km로 잡고 시간을 계산한다. */

@@ -61,9 +61,16 @@ data class Charger(
     /** 현재 차량의 남은 충전 시간(초). 비어 있으면 null. */
     val remainingSeconds: Int?,
     val reservedByMe: Boolean,
+    /** 지금 충전이 끝난 뒤 차례를 기다리는 다른 사람 예약들의 충전 시간(초), 순서대로. */
+    val othersQueueSeconds: List<Int> = emptyList(),
 ) {
     val isCharging: Boolean get() = remainingSeconds != null
     val remainingMinutes: Int get() = secondsToMinutes(remainingSeconds ?: 0)
+    val othersReserved: Int get() = othersQueueSeconds.size
+
+    /** 지금 충전 중인 차와 앞선 다른 사람 예약이 모두 끝나 내가 쓸 수 있을 때까지 남은 초. */
+    val availableInSeconds: Int get() = (remainingSeconds ?: 0) + othersQueueSeconds.sum()
+    val availableInMinutes: Int get() = secondsToMinutes(availableInSeconds)
 }
 
 data class Station(
@@ -75,18 +82,28 @@ data class Station(
     val total: Int get() = chargers.size
     val chargingCount: Int get() = chargers.count { it.isCharging }
 
-    /** 지금 바로 쓸 수 있는 자리 수. 내가 예약한 자리는 제외한다. */
-    val freeCount: Int get() = chargers.count { !it.isCharging && !it.reservedByMe }
+    /** 지금 바로 쓸 수 있는 자리 수. 내가 예약한 자리와 다른 사람이 예약한 자리는 제외한다. */
+    val freeCount: Int get() = chargers.count { !it.isCharging && !it.reservedByMe && it.othersReserved == 0 }
 
-    /** 가장 먼저 끝나는 충전기까지 남은 분. 빈 자리가 있으면 0. */
+    /** 다른 사람들이 걸어 둔 예약 수. */
+    val othersReservedCount: Int get() = chargers.sumOf { it.othersReserved }
+
+    /** 가장 먼저 쓸 수 있게 되는 충전기까지 남은 분(다른 사람 예약 포함). 빈 자리가 있으면 0. */
     val nextFreeMinutes: Int
-        get() = if (freeCount > 0) 0 else chargers.mapNotNull { it.remainingSeconds }.minOrNull()
+        get() = if (freeCount > 0) 0 else chargers.filter { !it.reservedByMe }.minOfOrNull { it.availableInSeconds }
             ?.let(::secondsToMinutes) ?: 0
 
-    /** 예약 시 배정될 충전기: 빈 자리 우선, 없으면 가장 빨리 끝나는 자리. */
+    /** 예약 시 배정될 충전기: 다른 사람 예약까지 고려해 가장 빨리 쓸 수 있는 자리. */
     val nextReservableCharger: Charger?
         get() = chargers.filter { !it.reservedByMe }
-            .minByOrNull { it.remainingSeconds ?: 0 }
+            .minByOrNull { it.availableInSeconds }
+
+    /**
+     * 지금 출발해 [travelSeconds] 걸려 도착하면 충전을 시작할 수 있을 때까지 걸리는 초.
+     * 도착 시간과, 충전 중인 차·다른 사람 예약이 끝나는 시간 중 늦은 쪽이다. 쓸 수 있는 충전기가 없으면 null.
+     */
+    fun startInSeconds(travelSeconds: Int): Int? =
+        chargers.filter { !it.reservedByMe }.minOfOrNull { maxOf(travelSeconds, it.availableInSeconds) }
 }
 
 data class Reservation(

@@ -34,6 +34,7 @@ import com.example.myapplication.data.OsmClient
 import com.example.myapplication.data.TmapChargerClient
 import com.example.myapplication.data.TmapRouteClient
 import com.example.myapplication.nav.NavRoute
+import com.example.myapplication.nav.StationEtas
 import com.example.myapplication.data.WeatherClient
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.ARRIVAL_RADIUS_METERS
 import com.example.myapplication.data.SimulatedChargingNetwork.Companion.RESERVE_RADIUS_METERS
@@ -89,7 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var heading = PARKED_HEADING
     private var source = PositionSource.DEFAULT
     private var headingAnchor: GeoPoint? = null
-    private var network = SimulatedChargingNetwork(DEFAULT_POSITION)
+    private var network = SimulatedChargingNetwork(DEFAULT_POSITION, othersReservationChance = SimulatedChargingNetwork.DEMO_OTHERS_RESERVATION_CHANCE)
     private var selectedStationId: String? = null
     private var listedStationIds: List<String> = emptyList()
     private var demoDriving = false
@@ -101,6 +102,11 @@ class MainActivity : AppCompatActivity() {
     private val chargerClient = TmapChargerClient(BuildConfig.TMAP_APP_KEY)
     private val evClient = EvChargerClient(BuildConfig.DATA_GO_KR_KEY)
     private val routeClient = TmapRouteClient(BuildConfig.TMAP_APP_KEY)
+    /** 충전소까지 실시간 교통 기준 소요 시간과 경로. */
+    private val stationEtas = StationEtas(routeClient)
+    private var etaNetwork: SimulatedChargingNetwork? = null
+    /** 충전소를 선택했을 때 지도에 미리 보여주는 경로. */
+    private var previewRoute: NavRoute? = null
     private var stationSource = StationSource.SIMULATED
     private var liveRegionCode: String? = null
     private var liveStatusAt = 0L
@@ -308,6 +314,7 @@ class MainActivity : AppCompatActivity() {
         navDistance = findViewById(R.id.navDistance)
         navInstruction = findViewById(R.id.navInstruction)
         navSummary = findViewById(R.id.navSummary)
+        map.setLabelShields(listOf(weatherChip, batteryChip, sourceChip, simChip, navBanner, navSummary))
         simChip.text = getString(R.string.sim_badge, SIM_SPEED)
 
         map.onStationTapped = ::selectStation
@@ -373,7 +380,7 @@ class MainActivity : AppCompatActivity() {
         if ((firstFix || (stationSource == StationSource.SIMULATED && movedMeters > STATIONS_REFRESH_METERS)) &&
             network.reservation() == null
         ) {
-            network = SimulatedChargingNetwork(position)
+            network = SimulatedChargingNetwork(position, othersReservationChance = SimulatedChargingNetwork.DEMO_OTHERS_RESERVATION_CHANCE)
         }
         // 실제 GPS 이동 시 차량 헤딩과 카메라 방향을 이동 방향으로 회전시킨다.
         // 0.1초 간격 갱신은 한 번에 움직이는 거리가 작아 방향이 흔들리므로, 일정 거리 이상 움직인 기준점과 비교한다.
@@ -423,6 +430,7 @@ class MainActivity : AppCompatActivity() {
             navRoute = next
             navProgress = 0.0
             demoDriving = true
+            previewRoute = null
             map.setRoute(next)
             map.followHeading = true
             render()
@@ -434,6 +442,7 @@ class MainActivity : AppCompatActivity() {
         demoDriving = false
         routeLoading = false
         navRoute = null
+        previewRoute = null
         map.setRoute(null)
         map.followHeading = false
         if (source == PositionSource.DEMO) source = PositionSource.VEHICLE
@@ -548,7 +557,9 @@ class MainActivity : AppCompatActivity() {
             }
             stationsLoading = false
             if (network.reservation() != null) return@fetchStations
-            network = SimulatedChargingNetwork(center, result.plans, arrivalChancePerMinute = 0.0)
+            network = SimulatedChargingNetwork(
+                center, result.plans, arrivalChancePerMinute = 0.0, othersReservationChance = SimulatedChargingNetwork.DEMO_OTHERS_RESERVATION_CHANCE,
+            )
             stationSource = StationSource.LIVE
             liveRegionCode = result.regionCode
             liveStatusAt = SystemClock.elapsedRealtime()
@@ -561,7 +572,7 @@ class MainActivity : AppCompatActivity() {
         chargerClient.fetch(center) { plans ->
             stationsLoading = false
             if (plans == null || network.reservation() != null) return@fetch
-            network = SimulatedChargingNetwork(center, plans)
+            network = SimulatedChargingNetwork(center, plans, othersReservationChance = SimulatedChargingNetwork.DEMO_OTHERS_RESERVATION_CHANCE)
             stationSource = StationSource.TMAP
             simChip.text = getString(R.string.sim_badge_tmap, SIM_SPEED)
             render()
@@ -673,6 +684,7 @@ class MainActivity : AppCompatActivity() {
         renderAmbience()
         val stations = network.stations()
         val reservation = network.reservation()
+        refreshEtas(stations)
 
         map.setCar(car, heading)
         map.setStations(stations, selectedStationId, reservation?.stationId, RESERVE_RADIUS_METERS)
@@ -703,6 +715,45 @@ class MainActivity : AppCompatActivity() {
         if (selected == null) renderList(stations) else renderDetail(selected, reservation)
     }
 
+    /** 충전소가 바뀌면 지난 경로를 버리고, 가까운 충전소의 실시간 소요 시간을 차례로 받는다. */
+    private fun refreshEtas(stations: List<Station>) {
+        if (network !== etaNetwork) {
+            etaNetwork = network
+            stationEtas.clear()
+        }
+        // 가상 주행 중에는 차가 빠르게 움직여 경로를 계속 다시 받게 되므로 멈춘다.
+        if (!demoDriving && !routeLoading && source != PositionSource.DEFAULT) {
+            stationEtas.refresh(car, stations, selectedStationId, lastPanelAt) { render() }
+        }
+        if (!demoDriving && !routeLoading) {
+            val preview = selectedStationId?.let(stationEtas::route)
+            if (preview !== previewRoute) {
+                previewRoute = preview
+                map.setRoute(preview)
+            }
+        }
+    }
+
+    /** 충전소까지 가는 시간(초). 실시간 교통 경로가 없으면 직선거리로 추정한다. */
+    private fun travelSeconds(station: Station): Int =
+        stationEtas.liveSeconds(station.id) ?: StationEtas.estimateSeconds(car.distanceTo(station.position))
+
+    /** 지금 출발하면 충전을 시작할 수 있을 때까지 걸리는 초. 가는 시간과 충전기가 비는 시간 중 늦은 쪽. */
+    private fun startSeconds(station: Station): Int =
+        station.startInSeconds(travelSeconds(station)) ?: Int.MAX_VALUE
+
+    /** "1.2 km · 9분". 실시간 교통 경로가 없으면 직선거리로 추정하고 표시한다. */
+    private fun distanceAndEta(station: Station, distance: Double): String {
+        val live = stationEtas.liveSeconds(station.id)
+        return if (live != null) {
+            getString(R.string.eta_live, formatDistance(distance), etaMinutes(live))
+        } else {
+            getString(R.string.eta_estimate, formatDistance(distance), etaMinutes(StationEtas.estimateSeconds(distance)))
+        }
+    }
+
+    private fun etaMinutes(seconds: Int): Int = maxOf(1, (seconds + 30) / 60)
+
     private fun renderReservation(reservation: Reservation?, stations: List<Station>) {
         reservationCard.visibility = if (reservation == null) View.GONE else View.VISIBLE
         if (reservation == null) return
@@ -721,8 +772,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderList(stations: List<Station>) {
-        val sorted = stations.sortedBy { car.distanceTo(it.position) }
-        listSummary.text = getString(R.string.list_summary, stations.sumOf { it.freeCount })
+        // 도착해서 충전을 가장 빨리 시작할 수 있는 순. 같으면 가까운 곳을 먼저.
+        val sorted = stations.sortedWith(compareBy<Station>({ startSeconds(it) }, { travelSeconds(it) }))
+        listSummary.text = sorted.firstOrNull()?.let {
+            getString(R.string.list_summary, etaMinutes(startSeconds(it)))
+        }.orEmpty()
         // 1초마다 갱신되므로 행을 다시 만들면 누르는 도중 터치가 끊긴다. 있는 행을 재사용한다.
         syncRows(stationRows, sorted.size, R.layout.item_station)
         listedStationIds = sorted.map { it.id }
@@ -730,9 +784,8 @@ class MainActivity : AppCompatActivity() {
             val row = stationRows.getChildAt(index)
             val distance = car.distanceTo(station.position)
             row.findViewById<TextView>(R.id.name).text = station.name
-            row.findViewById<TextView>(R.id.distance).text = formatDistance(distance)
-            row.findViewById<TextView>(R.id.charging).text =
-                getString(R.string.charging_count, station.chargingCount, station.total)
+            row.findViewById<TextView>(R.id.distance).text = distanceAndEta(station, distance)
+            row.findViewById<TextView>(R.id.charging).text = chargingText(station)
             row.findViewById<View>(R.id.rangeTag).visibility =
                 if (distance <= RESERVE_RADIUS_METERS) View.VISIBLE else View.GONE
             bindStatus(row.findViewById(R.id.status), station)
@@ -747,8 +800,8 @@ class MainActivity : AppCompatActivity() {
     private fun renderDetail(station: Station, reservation: Reservation?) {
         val distance = car.distanceTo(station.position)
         detailName.text = station.name
-        detailDistance.text = formatDistance(distance)
-        detailCharging.text = getString(R.string.charging_count, station.chargingCount, station.total)
+        detailDistance.text = distanceAndEta(station, distance)
+        detailCharging.text = chargingText(station)
         bindStatus(detailNextFree, station)
         detailBar.setChargers(station.chargers)
 
@@ -761,17 +814,29 @@ class MainActivity : AppCompatActivity() {
         bindReserveButton(station, reservation, distance)
     }
 
-    /** 빈자리 또는 대기 시간을 색이 있는 배지로 보여준다. */
+    /**
+     * 지금 가면 도착해서 바로 충전할 수 있는지, 몇 분 기다려야 하는지를 색이 있는 배지로 보여준다.
+     * 가는 동안 끝나는 충전과 다른 사람 예약까지 따진다.
+     */
     private fun bindStatus(view: TextView, station: Station) {
-        val hasFree = station.freeCount > 0
-        view.text = if (hasFree) {
-            getString(R.string.status_free, station.freeCount)
-        } else {
-            getString(R.string.status_wait, station.nextFreeMinutes)
+        val travel = travelSeconds(station)
+        val waitSeconds = station.startInSeconds(travel)?.minus(travel)
+        val ready = waitSeconds != null && waitSeconds <= 0
+        view.text = when {
+            waitSeconds == null -> getString(R.string.status_unavailable)
+            ready -> getString(R.string.status_ready_on_arrival)
+            else -> getString(R.string.status_wait_on_arrival, etaMinutes(waitSeconds))
         }
         view.backgroundTintList = ColorStateList.valueOf(
-            ContextCompat.getColor(this, if (hasFree) R.color.accent_free else R.color.accent_busy),
+            ContextCompat.getColor(this, if (ready) R.color.accent_free else R.color.accent_busy),
         )
+    }
+
+    /** "충전 중 2 / 5대 · 다른 예약 1건(가상)" */
+    private fun chargingText(station: Station): String {
+        val charging = getString(R.string.charging_count, station.chargingCount, station.total)
+        val reserved = station.othersReservedCount
+        return if (reserved == 0) charging else getString(R.string.charging_with_reservations, charging, reserved)
     }
 
     private fun bindChargerStatus(view: TextView, charger: Charger) {
@@ -779,6 +844,9 @@ class MainActivity : AppCompatActivity() {
             charger.reservedByMe && charger.isCharging ->
                 getString(R.string.charger_mine_wait, charger.remainingMinutes) to R.color.accent_free
             charger.reservedByMe -> getString(R.string.charger_mine_ready) to R.color.accent_free
+            charger.isCharging && charger.othersReserved > 0 -> getString(
+                R.string.charger_charging_queued, charger.remainingMinutes, charger.othersReserved, charger.availableInMinutes,
+            ) to R.color.accent_busy
             charger.isCharging ->
                 getString(R.string.charger_charging, charger.remainingMinutes) to R.color.accent_busy
             else -> getString(R.string.charger_free) to R.color.accent_free
@@ -807,8 +875,8 @@ class MainActivity : AppCompatActivity() {
 
             else -> {
                 reserveButton.isEnabled = true
-                reserveButton.text = if (next.isCharging) {
-                    getString(R.string.reserve_wait, next.number, next.remainingMinutes)
+                reserveButton.text = if (next.availableInSeconds > 0) {
+                    getString(R.string.reserve_wait, next.number, next.availableInMinutes)
                 } else {
                     getString(R.string.reserve_now, next.number)
                 }

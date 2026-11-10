@@ -126,7 +126,14 @@ class GoMapView @JvmOverloads constructor(
     private var carRoadMeters = DEFAULT_CAR_ROAD_METERS
     private var carRoadCheckedAt: GeoPoint? = null
     private var carRoadScene: MapScene? = null
-    private val placedLabels = ArrayList<RectF>()
+    /** 지도 위에 떠 있는 칩·배너. 그 아래에 깔리는 건물 이름은 칩 글씨와 겹쳐 보이지 않게 흐리게 그린다. */
+    private var labelShields: List<View> = emptyList()
+    private val shieldRects = ArrayList<RectF>()
+    private val shieldOrigin = IntArray(2)
+    private val shieldLocation = IntArray(2)
+    /** 직전 화면에 그린 건물 이름. 이름 수를 줄이는 배율에서 먼저 자리를 줘 깜빡이지 않게 한다. */
+    private var lastBuildingLabels: Set<String> = emptySet()
+    private val placedLabelRects = ArrayList<RectF>()
     private var buildingDepth = FloatArray(0)
     private var routeProgress = 0.0
 
@@ -268,6 +275,11 @@ class GoMapView @JvmOverloads constructor(
     /** 출발점부터 지금까지 경로를 따라 간 거리(미터). 지난 길은 흐리게 그린다. */
     fun setRouteProgress(meters: Double) {
         routeProgress = meters
+    }
+
+    /** 지도 위에 겹쳐 놓인 칩·배너를 알려준다. 그 아래 건물 이름은 흐리게 그린다. */
+    fun setLabelShields(views: List<View>) {
+        labelShields = views
     }
 
     fun zoomIn() {
@@ -570,7 +582,10 @@ class GoMapView @JvmOverloads constructor(
             stroke.alpha = BUILDING_EDGE_ALPHA
             stroke.strokeWidth = 1.5f * unit
             canvas.drawPath(path, stroke)
-            building.tmapName?.let { name -> collectBuildingLabel(building, name, height, east, north) }
+            // 확대하면 동 이름("경산푸르지오 101동"), 기본·축소 배율에서는 단지 이름("경산푸르지오")을 붙인다.
+            val dongView = zoomStep >= DONG_LABEL_ZOOM_STEP
+            val name = if (dongView) building.label else building.tmapName ?: building.label
+            name?.let { collectBuildingLabel(building, it, height, east, north) }
         }
         fill.alpha = 255
         stroke.alpha = 255
@@ -580,7 +595,13 @@ class GoMapView @JvmOverloads constructor(
     private class BuildingLabel(val name: String, val x: Float, val y: Float, val depth: Float, val scale: Float)
 
     /** 이름이 있는 건물의 지붕 중심 화면 위치를 모아 둔다. 가까운 건물만 이름을 붙인다. */
-    private fun collectBuildingLabel(building: MapScene.Building, name: String, height: Float, east: Float, north: Float) {
+    private fun collectBuildingLabel(
+        building: MapScene.Building,
+        name: String,
+        height: Float,
+        east: Float,
+        north: Float,
+    ) {
         val dx = building.centerEast - east
         val dy = building.centerNorth - north
         if (hypot(dx, dy) > BUILDING_LABEL_METERS) return
@@ -591,32 +612,98 @@ class GoMapView @JvmOverloads constructor(
     }
 
     /**
-     * 건물 이름을 지붕 위에 그린다. 가까운 건물부터 놓고, 이미 놓은 이름과 겹치거나
-     * 같은 이름(캠퍼스처럼 여러 동이 한 이름)이 있으면 건너뛴다.
+     * 건물 이름을 지붕 위에 그린다. 확대할수록 많이 보여준다.
+     * - 축소·기본 배율: 서로 넉넉히 떨어진 이름만 몇 개. 여러 채가 한 이름인 단지·캠퍼스를 먼저 보여준다.
+     * - 확대 1단계: 겹치지 않는 범위에서 많이.
+     * - 최대 확대: 겹쳐도 모두.
+     * 같은 이름은 한 번만 그리고, 먼 건물부터 그려 가까운 건물 이름이 위에 오게 한다.
+     * 칩·배너 아래에 깔리는 이름은 칩 글씨와 겹쳐 보이지 않도록 흐리게 그린다.
      */
     private fun drawBuildingLabels(canvas: Canvas) {
-        if (buildingLabels.isEmpty()) return
-        buildingLabels.sortBy { it.depth }
-        placedLabels.clear()
-        val drawn = HashSet<String>()
-        for (label in buildingLabels) {
-            if (placedLabels.size >= MAX_BUILDING_LABELS) break
-            if (label.name in drawn) continue
-            text.textSize = max(18f * unit, 24f * unit * label.scale)
-            val halo = text.textSize * 0.18f
-            val half = text.measureText(label.name) / 2 + halo
-            val baseline = label.y - 6f * unit
-            val rect = RectF(label.x - half, baseline - text.textSize - halo, label.x + half, baseline + text.textSize * 0.25f + halo)
-            // 화면 가장자리에 걸려 잘리는 이름은 그리지 않는다.
-            if (rect.top < 0f || rect.bottom > height || rect.left < 0f || rect.right > width) continue
-            if (placedLabels.any { RectF.intersects(it, rect) }) continue
-            placedLabels += rect
-            drawn += label.name
-            labelHalo.textSize = text.textSize
-            labelHalo.strokeWidth = halo * 2
-            canvas.drawText(label.name, label.x, baseline, labelHalo)
-            text.color = BUILDING_LABEL_COLOR
-            canvas.drawText(label.name, label.x, baseline, text)
+        if (buildingLabels.isEmpty()) {
+            lastBuildingLabels = emptySet()
+            return
+        }
+        updateShieldRects()
+        val buildingsPerName = buildingLabels.groupingBy { it.name }.eachCount()
+        val seen = HashSet<String>()
+        val unique = buildingLabels.sortedBy { it.depth }.filter { seen.add(it.name) }
+        val (maxLabels, gap) = labelDensity()
+        val chosen = if (maxLabels == Int.MAX_VALUE) {
+            unique
+        } else {
+            // 단지(여러 채) → 직전에 보이던 이름 → 가까운 건물 순으로 자리를 준다.
+            // 단지를 먼저 두어야 이름이 늦게 도착한 단지가 먼저 자리 잡은 작은 건물에 밀리지 않는다.
+            val ordered = unique.sortedWith(
+                compareBy<BuildingLabel>(
+                    { if ((buildingsPerName[it.name] ?: 1) > 1) 0 else 1 },
+                    { it.name !in lastBuildingLabels },
+                    { it.depth },
+                ),
+            )
+            placedLabelRects.clear()
+            val picked = ArrayList<BuildingLabel>()
+            for (label in ordered) {
+                if (picked.size >= maxLabels) break
+                val rect = labelRect(label) ?: continue
+                rect.inset(-gap, -gap)
+                if (placedLabelRects.any { RectF.intersects(it, rect) }) continue
+                placedLabelRects += rect
+                picked += label
+            }
+            picked.sortedBy { it.depth }
+        }
+        lastBuildingLabels = chosen.mapTo(HashSet()) { it.name }
+        for (label in chosen.asReversed()) drawBuildingLabel(canvas, label)
+    }
+
+    /** 확대 단계별 (최대 이름 수, 이름 사이 최소 간격 px). */
+    private fun labelDensity(): Pair<Int, Float> = when {
+        zoomStep <= -1 -> 5 to 48f * unit
+        zoomStep == 0 -> 10 to 28f * unit
+        zoomStep == 1 -> 28 to 6f * unit
+        else -> Int.MAX_VALUE to 0f
+    }
+
+    /** 이름을 그릴 자리. 화면 가장자리에 걸리면 안쪽으로 밀어 넣는다. 화면 밖이면 null. */
+    private fun labelRect(label: BuildingLabel): RectF? {
+        text.textSize = max(18f * unit, 24f * unit * label.scale)
+        val halo = text.textSize * 0.18f
+        val half = text.measureText(label.name) / 2 + halo
+        val baseline = label.y - 6f * unit
+        if (label.x < 0f || label.x > width || baseline < 0f || baseline > height) return null
+        val x = label.x.coerceIn(half, max(half, width - half))
+        return RectF(x - half, baseline - text.textSize - halo, x + half, baseline + text.textSize * 0.25f + halo)
+    }
+
+    private fun drawBuildingLabel(canvas: Canvas, label: BuildingLabel) {
+        val rect = labelRect(label) ?: return
+        val halo = text.textSize * 0.18f
+        val x = rect.centerX()
+        val baseline = label.y - 6f * unit
+        val alpha = if (shieldRects.any { RectF.intersects(it, rect) }) SHIELDED_LABEL_ALPHA else 255
+        labelHalo.textSize = text.textSize
+        labelHalo.strokeWidth = halo * 2
+        labelHalo.alpha = alpha
+        canvas.drawText(label.name, x, baseline, labelHalo)
+        text.color = BUILDING_LABEL_COLOR
+        text.alpha = alpha
+        canvas.drawText(label.name, x, baseline, text)
+        labelHalo.alpha = 255
+        text.alpha = 255
+    }
+
+    /** 칩·배너가 이 지도 위 어디에 떠 있는지 지도 좌표로 구한다. */
+    private fun updateShieldRects() {
+        shieldRects.clear()
+        if (labelShields.isEmpty()) return
+        getLocationInWindow(shieldOrigin)
+        for (view in labelShields) {
+            if (!view.isShown || view.width == 0) continue
+            view.getLocationInWindow(shieldLocation)
+            val left = (shieldLocation[0] - shieldOrigin[0]).toFloat()
+            val top = (shieldLocation[1] - shieldOrigin[1]).toFloat()
+            shieldRects += RectF(left, top, left + view.width, top + view.height)
         }
     }
 
@@ -911,16 +998,25 @@ class GoMapView @JvmOverloads constructor(
             for (i in 0 until points.size - 1) {
                 val start = path.cumulative[i]
                 val end = path.cumulative[i + 1]
+                val color = congestionColor(path.congestion[i])
                 when {
-                    end <= routeProgress -> if (!outline) drawRouteSegment(canvas, position, points[i], points[i + 1], true, false)
-                    start >= routeProgress -> drawRouteSegment(canvas, position, points[i], points[i + 1], false, outline)
+                    end <= routeProgress -> if (!outline) drawRouteSegment(canvas, position, points[i], points[i + 1], true, false, color)
+                    start >= routeProgress -> drawRouteSegment(canvas, position, points[i], points[i + 1], false, outline, color)
                     else -> {
-                        if (!outline) drawRouteSegment(canvas, position, points[i], split, true, false)
-                        drawRouteSegment(canvas, position, split, points[i + 1], false, outline)
+                        if (!outline) drawRouteSegment(canvas, position, points[i], split, true, false, color)
+                        drawRouteSegment(canvas, position, split, points[i + 1], false, outline, color)
                     }
                 }
             }
         }
+    }
+
+    /** 실시간 교통 색. 원활 초록, 서행·지체 주황, 정체 빨강. 교통 정보가 없는 구간은 기본 파랑. */
+    private fun congestionColor(level: Int): Int = when (level) {
+        NavRoute.CONGESTION_SMOOTH -> ROUTE_SMOOTH_COLOR
+        NavRoute.CONGESTION_SLOW, NavRoute.CONGESTION_DELAY -> ROUTE_SLOW_COLOR
+        NavRoute.CONGESTION_JAM -> ROUTE_JAM_COLOR
+        else -> ROUTE_COLOR
     }
 
     /** 경로 한 구간을 바닥에 그린다. 멀수록 가늘어지고 카메라 뒤쪽은 잘라낸다. */
@@ -931,6 +1027,7 @@ class GoMapView @JvmOverloads constructor(
         to: GeoPoint,
         traveled: Boolean,
         outline: Boolean,
+        color: Int,
     ) {
         val (fromEast, fromNorth) = from.metersFrom(position)
         val (toEast, toNorth) = to.metersFrom(position)
@@ -955,7 +1052,7 @@ class GoMapView @JvmOverloads constructor(
         stroke.color = when {
             outline -> ROUTE_OUTLINE_COLOR
             traveled -> ROUTE_TRAVELED_COLOR
-            else -> ROUTE_COLOR
+            else -> color
         }
         canvas.drawLine(screenX(ax, ay), screenY(ay), screenX(bx, by), screenY(by), stroke)
         stroke.strokeCap = Paint.Cap.BUTT
@@ -1303,7 +1400,10 @@ class GoMapView @JvmOverloads constructor(
         private const val BUILDING_EDGE_ALPHA = 200
         /** 차에서 이 거리 안의 건물에만 이름을 붙인다. */
         private const val BUILDING_LABEL_METERS = 450f
-        private const val MAX_BUILDING_LABELS = 14
+        /** 칩 아래에 깔린 건물 이름의 불투명도(0~255). 칩 글씨가 또렷하게 읽히도록 낮게 둔다. */
+        private const val SHIELDED_LABEL_ALPHA = 45
+        /** 이 확대 단계부터 아파트 동 이름을 보여준다. 0이 기본 배율이다. */
+        private const val DONG_LABEL_ZOOM_STEP = 1
         private val BUILDING_LABEL_COLOR = Color.rgb(40, 44, 52)
         private const val BUILDING_HEIGHT_SCALE = 4f
         private const val FACILITY_RADIUS = 20f
@@ -1322,6 +1422,9 @@ class GoMapView @JvmOverloads constructor(
         private const val ROUTE_WIDTH = 22f
         private val ROUTE_COLOR = Color.rgb(66, 153, 255)
         private val ROUTE_OUTLINE_COLOR = Color.rgb(18, 56, 112)
+        private val ROUTE_SMOOTH_COLOR = Color.rgb(46, 204, 113)
+        private val ROUTE_SLOW_COLOR = Color.rgb(255, 152, 0)
+        private val ROUTE_JAM_COLOR = Color.rgb(239, 68, 68)
         private val ROUTE_TRAVELED_COLOR = Color.argb(150, 150, 160, 172)
         private const val RECENTER_ANIMATION_MS = 280L
         /** 기본 상태(0단계)에서 줌인은 최대 2번까지만 가능하다. */
