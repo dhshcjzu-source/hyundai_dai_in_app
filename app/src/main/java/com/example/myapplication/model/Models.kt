@@ -56,6 +56,9 @@ data class GeoPoint(val latitude: Double, val longitude: Double) {
     }
 }
 
+/** 충전 속도 구분. 공공데이터 기준으로 완속은 AC 완속형과 11kW 이하 충전기다. */
+enum class ChargerSpeed { FAST, SLOW }
+
 data class Charger(
     val number: Int,
     /** 현재 차량의 남은 충전 시간(초). 비어 있으면 null. */
@@ -63,6 +66,8 @@ data class Charger(
     val reservedByMe: Boolean,
     /** 지금 충전이 끝난 뒤 차례를 기다리는 다른 사람 예약들의 충전 시간(초), 순서대로. */
     val othersQueueSeconds: List<Int> = emptyList(),
+    /** 급속/완속. 데이터에 없으면 null. */
+    val speed: ChargerSpeed? = null,
 ) {
     val isCharging: Boolean get() = remainingSeconds != null
     val remainingMinutes: Int get() = secondsToMinutes(remainingSeconds ?: 0)
@@ -81,6 +86,8 @@ data class Station(
 ) {
     val total: Int get() = chargers.size
     val chargingCount: Int get() = chargers.count { it.isCharging }
+    val fastCount: Int get() = chargers.count { it.speed == ChargerSpeed.FAST }
+    val slowCount: Int get() = chargers.count { it.speed == ChargerSpeed.SLOW }
 
     /** 지금 바로 쓸 수 있는 자리 수. 내가 예약한 자리와 다른 사람이 예약한 자리는 제외한다. */
     val freeCount: Int get() = chargers.count { !it.isCharging && !it.reservedByMe && it.othersReserved == 0 }

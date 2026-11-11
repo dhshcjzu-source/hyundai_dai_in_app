@@ -41,6 +41,8 @@ import com.example.myapplication.data.SimulatedChargingNetwork.Companion.RESERVE
 import com.example.myapplication.map.MapScene
 import com.example.myapplication.model.Ambience
 import com.example.myapplication.model.Charger
+import com.example.myapplication.model.ChargerSpeed
+import com.example.myapplication.model.DrivingRange
 import com.example.myapplication.model.GeoPoint
 import com.example.myapplication.model.ReserveResult
 import com.example.myapplication.model.Reservation
@@ -92,6 +94,9 @@ class MainActivity : AppCompatActivity() {
     private var headingAnchor: GeoPoint? = null
     private var network = SimulatedChargingNetwork(DEFAULT_POSITION, othersReservationChance = SimulatedChargingNetwork.DEMO_OTHERS_RESERVATION_CHANCE)
     private var selectedStationId: String? = null
+    /** 차량에서 받은 배터리 잔량(%)과 주행 가능 거리(SDK 원값). 못 받았으면 null. */
+    private var batteryPercent: Int? = null
+    private var rangeSdkValue: Float? = null
     private var listedStationIds: List<String> = emptyList()
     private var demoDriving = false
     private var lastTickAt = 0L
@@ -366,10 +371,48 @@ class MainActivity : AppCompatActivity() {
             context = this,
             onLocation = ::onVehicleLocation,
             onBattery = { percent ->
-                if (percent == null) batteryChip.setText(R.string.battery_unknown)
-                else batteryChip.text = getString(R.string.battery_value, percent)
+                batteryPercent = percent
+                renderBattery()
+                render()
+            },
+            onRange = { value ->
+                rangeSdkValue = value
+                renderBattery()
+                render()
             },
         ).also { it.start() }
+    }
+
+    /** 갈 수 있는 거리(미터). 차량 주행 가능 거리 → 배터리 잔량 추정 순으로 쓰고, 둘 다 없으면 null(거르지 않음). */
+    private fun rangeMeters(): Double? =
+        DrivingRange.fromSdkValue(rangeSdkValue, batteryPercent)
+            ?: batteryPercent?.let(DrivingRange::estimateFromSoc)
+
+    private fun renderBattery() {
+        val percent = batteryPercent
+        val range = rangeMeters()
+        batteryChip.text = when {
+            percent != null && range != null -> getString(R.string.battery_with_range, percent, formatDistance(range))
+            percent != null -> getString(R.string.battery_value, percent)
+            range != null -> getString(R.string.range_value, formatDistance(range))
+            else -> getString(R.string.battery_unknown)
+        }
+    }
+
+    /**
+     * 남은 배터리로 갈 수 있는 충전소만 남긴다. 예약했거나 선택한 충전소는 계속 보여준다.
+     * 배터리 정보가 없으면 거르지 않는다.
+     */
+    private fun reachableStations(stations: List<Station>): List<Station> {
+        val range = rangeMeters() ?: return stations
+        val keep = setOfNotNull(network.reservation()?.stationId, selectedStationId)
+        return stations.filter { station ->
+            station.id in keep || DrivingRange.isReachable(
+                car.distanceTo(station.position),
+                stationEtas.route(station.id)?.totalMeters,
+                range,
+            )
+        }
     }
 
     private fun onVehicleLocation(position: GeoPoint) {
@@ -412,7 +455,7 @@ class MainActivity : AppCompatActivity() {
             stopDemo()
             return
         }
-        val stations = network.stations()
+        val stations = reachableStations(network.stations())
         val target = stations.firstOrNull { it.id == selectedStationId }
             ?: stations.filter { car.distanceTo(it.position) > ARRIVAL_RADIUS_METERS }
                 .minByOrNull { car.distanceTo(it.position) }
@@ -682,9 +725,11 @@ class MainActivity : AppCompatActivity() {
         refreshScene(lastPanelAt)
         refreshBuildingNames()
         renderAmbience()
-        val stations = network.stations()
+        val allStations = network.stations()
         val reservation = network.reservation()
-        refreshEtas(stations)
+        // 경로는 전체 충전소 기준으로 받아야 직선거리 추정으로 빠진 곳도 실제 거리로 다시 판단할 수 있다.
+        refreshEtas(allStations)
+        val stations = reachableStations(allStations)
 
         map.setCar(car, heading)
         map.setStations(stations, selectedStationId, reservation?.stationId, RESERVE_RADIUS_METERS)
@@ -712,7 +757,7 @@ class MainActivity : AppCompatActivity() {
         val selected = stations.firstOrNull { it.id == selectedStationId }
         listPane.visibility = if (selected == null) View.VISIBLE else View.GONE
         detailPane.visibility = if (selected == null) View.GONE else View.VISIBLE
-        if (selected == null) renderList(stations) else renderDetail(selected, reservation)
+        if (selected == null) renderList(stations, allStations.size - stations.size) else renderDetail(selected, reservation)
     }
 
     /** 충전소가 바뀌면 지난 경로를 버리고, 가까운 충전소의 실시간 소요 시간을 차례로 받는다. */
@@ -771,12 +816,17 @@ class MainActivity : AppCompatActivity() {
         startChargingButton.isEnabled = reservation.waitMinutes == 0
     }
 
-    private fun renderList(stations: List<Station>) {
+    private fun renderList(stations: List<Station>, outOfRangeCount: Int) {
         // 도착해서 충전을 가장 빨리 시작할 수 있는 순. 같으면 가까운 곳을 먼저.
         val sorted = stations.sortedWith(compareBy<Station>({ startSeconds(it) }, { travelSeconds(it) }))
-        listSummary.text = sorted.firstOrNull()?.let {
+        val summary = sorted.firstOrNull()?.let {
             getString(R.string.list_summary, etaMinutes(startSeconds(it)))
-        }.orEmpty()
+        } ?: if (outOfRangeCount > 0) getString(R.string.list_none_in_range) else ""
+        listSummary.text = if (outOfRangeCount > 0) {
+            getString(R.string.list_out_of_range, summary, outOfRangeCount)
+        } else {
+            summary
+        }
         // 1초마다 갱신되므로 행을 다시 만들면 누르는 도중 터치가 끊긴다. 있는 행을 재사용한다.
         syncRows(stationRows, sorted.size, R.layout.item_station)
         listedStationIds = sorted.map { it.id }
@@ -789,6 +839,10 @@ class MainActivity : AppCompatActivity() {
             row.findViewById<View>(R.id.rangeTag).visibility =
                 if (distance <= RESERVE_RADIUS_METERS) View.VISIBLE else View.GONE
             bindStatus(row.findViewById(R.id.status), station)
+            row.findViewById<TextView>(R.id.speed).apply {
+                text = speedText(station)
+                visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+            }
             row.findViewById<ChargerBar>(R.id.bar).setChargers(station.chargers)
             row.setBackgroundResource(
                 if (distance <= RESERVE_RADIUS_METERS) R.drawable.bg_card_highlight else R.drawable.bg_card,
@@ -801,14 +855,16 @@ class MainActivity : AppCompatActivity() {
         val distance = car.distanceTo(station.position)
         detailName.text = station.name
         detailDistance.text = distanceAndEta(station, distance)
-        detailCharging.text = chargingText(station)
+        detailCharging.text = listOf(speedText(station), chargingText(station)).filter { it.isNotEmpty() }.joinToString(" · ")
         bindStatus(detailNextFree, station)
         detailBar.setChargers(station.chargers)
 
         syncRows(chargerRows, station.chargers.size, R.layout.item_charger)
         station.chargers.forEachIndexed { index, charger ->
             val row = chargerRows.getChildAt(index)
-            row.findViewById<TextView>(R.id.number).text = getString(R.string.charger_number, charger.number)
+            row.findViewById<TextView>(R.id.number).text = charger.speed?.let {
+                getString(R.string.charger_number_speed, charger.number, speedLabel(it))
+            } ?: getString(R.string.charger_number, charger.number)
             bindChargerStatus(row.findViewById(R.id.status), charger)
         }
         bindReserveButton(station, reservation, distance)
@@ -831,6 +887,19 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.getColor(this, if (ready) R.color.accent_free else R.color.accent_busy),
         )
     }
+
+    /** "급속 2 · 완속 1". 급속/완속 정보가 없으면 빈 문자열. */
+    private fun speedText(station: Station): String = listOfNotNull(
+        station.fastCount.takeIf { it > 0 }?.let { getString(R.string.speed_count, speedLabel(ChargerSpeed.FAST), it) },
+        station.slowCount.takeIf { it > 0 }?.let { getString(R.string.speed_count, speedLabel(ChargerSpeed.SLOW), it) },
+    ).joinToString(" · ")
+
+    private fun speedLabel(speed: ChargerSpeed): String = getString(
+        when (speed) {
+            ChargerSpeed.FAST -> R.string.speed_fast
+            ChargerSpeed.SLOW -> R.string.speed_slow
+        },
+    )
 
     /** "충전 중 2 / 5대 · 다른 예약 1건(가상)" */
     private fun chargingText(station: Station): String {

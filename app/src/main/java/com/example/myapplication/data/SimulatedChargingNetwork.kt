@@ -1,6 +1,7 @@
 package com.example.myapplication.data
 
 import com.example.myapplication.model.Charger
+import com.example.myapplication.model.ChargerSpeed
 import com.example.myapplication.model.GeoPoint
 import com.example.myapplication.model.ReserveResult
 import com.example.myapplication.model.Reservation
@@ -39,12 +40,14 @@ class SimulatedChargingNetwork(
         val chargerIds: List<String> = emptyList(),
         /** 충전기별 남은 시간(초), null은 비어 있음. 목록이 없으면 앞쪽 [occupied]대에 임의 시간을 준다. */
         val remainingSeconds: List<Int?>? = null,
+        /** 충전기별 급속/완속. 목록이 없거나 모르는 자리는 null. */
+        val speeds: List<ChargerSpeed?>? = null,
     )
 
     /** 실제 충전기 상태 한 건. [remainingSeconds]가 null이면 비어 있다. */
     data class LiveUpdate(val stationId: String, val chargerId: String, val remainingSeconds: Int?)
 
-    private class SimCharger(var remainingSeconds: Int?) {
+    private class SimCharger(var remainingSeconds: Int?, val speed: ChargerSpeed?) {
         /** 내가 시작한 충전. 실시간 상태로 덮어쓰지 않는다. */
         var mine = false
         /** 다른 사람 예약으로 시작한 충전. 가상이므로 실시간 상태로 덮어쓰지 않는다. */
@@ -80,6 +83,7 @@ class SimulatedChargingNetwork(
                         index < plan.occupied -> randomSession()
                         else -> null
                     },
+                    plan.speeds?.getOrNull(index),
                 )
             },
             chargerIds = plan.chargerIds,
@@ -105,6 +109,7 @@ class SimulatedChargingNetwork(
                     remainingSeconds = charger.remainingSeconds,
                     reservedByMe = isReserved(station, index),
                     othersQueueSeconds = charger.othersQueue.toList(),
+                    speed = charger.speed,
                 )
             },
         )
@@ -241,13 +246,15 @@ class SimulatedChargingNetwork(
         private const val MAX_OTHERS_QUEUE = 2
         /** 분당 새 예약이 들어올 확률 = [othersReservationChance] x 이 값. */
         private const val NEW_RESERVATION_RATE = 0.05
+        private val FAST = ChargerSpeed.FAST
+        private val SLOW = ChargerSpeed.SLOW
 
         val DEFAULT_PLANS = listOf(
-            StationPlan("hanbit", "한빛공원 충전소", 900.0, 500.0, total = 2, occupied = 1),
-            StationPlan("saesol", "새솔마을 충전소", -650.0, -1_100.0, total = 2, occupied = 2),
-            StationPlan("market", "중앙시장 공영주차장", 2_200.0, -900.0, total = 4, occupied = 4),
-            StationPlan("river", "강변로 급속충전소", 2_800.0, 1_500.0, total = 3, occupied = 2),
-            StationPlan("annex", "시청 별관 충전소", 4_200.0, -300.0, total = 3, occupied = 1),
+            StationPlan("hanbit", "한빛공원 충전소", 900.0, 500.0, total = 2, occupied = 1, speeds = listOf(FAST, SLOW)),
+            StationPlan("saesol", "새솔마을 충전소", -650.0, -1_100.0, total = 2, occupied = 2, speeds = listOf(SLOW, SLOW)),
+            StationPlan("market", "중앙시장 공영주차장", 2_200.0, -900.0, total = 4, occupied = 4, speeds = listOf(FAST, FAST, SLOW, SLOW)),
+            StationPlan("river", "강변로 급속충전소", 2_800.0, 1_500.0, total = 3, occupied = 2, speeds = listOf(FAST, FAST, FAST)),
+            StationPlan("annex", "시청 별관 충전소", 4_200.0, -300.0, total = 3, occupied = 1, speeds = listOf(FAST, SLOW, SLOW)),
         )
     }
 }

@@ -7,6 +7,8 @@
     <string name="nav_arrived_toast">목적지에 도착했습니다</string>
     <string name="sim_badge_tmap">TMAP 실제 충전소 · 현황 시뮬레이션 %1$d배속</string>
     <string name="battery_value">배터리 %1$d%%</string>
+    <string name="battery_with_range">배터리 %1$d%% · 약 %2$s</string>
+    <string name="range_value">주행 가능 약 %1$s</string>
     <string name="battery_unknown">배터리 정보 없음</string>
     <string name="source_vehicle">위치: 차량 GPS</string>
     <string name="source_default">위치: 기본값 (GPS 수신 대기)</string>
@@ -49,6 +51,8 @@
     <string name="next_free_in">다음 자리까지 %1$d분</string>
     <string name="in_range">예약 가능</string>
     <string name="list_summary">충전 시작 빠른 순 · 1위 %1$d분 뒤</string>
+    <string name="list_out_of_range">%1$s · 배터리로 못 가는 %2$d곳 숨김</string>
+    <string name="list_none_in_range">남은 배터리로 갈 수 있는 충전소가 없습니다</string>
     <string name="status_ready_on_arrival">도착 즉시 충전</string>
     <string name="status_wait_on_arrival">도착 후 %1$d분 대기</string>
     <string name="status_unavailable">충전기 없음</string>
@@ -58,6 +62,10 @@
     <string name="status_wait">%1$d분 대기</string>
 
     <string name="charger_number">%1$d번</string>
+    <string name="charger_number_speed">%1$d번 %2$s</string>
+    <string name="speed_fast">급속</string>
+    <string name="speed_slow">완속</string>
+    <string name="speed_count">%1$s %2$d</string>
     <string name="charger_free">비어 있음</string>
     <string name="charger_charging">충전 중 · 약 %1$d분 남음</string>
     <string name="charger_mine_ready">내 예약 · 비어 있음</string>

@@ -30,6 +30,8 @@ class VehicleGateway(
     private val context: Context,
     private val onLocation: (GeoPoint) -> Unit,
     private val onBattery: (Int?) -> Unit,
+    /** 차량이 계산한 주행 가능 거리. SDK 원값 그대로 넘기며 단위 해석은 [com.example.myapplication.model.DrivingRange]가 한다. */
+    private val onRange: (Float?) -> Unit = {},
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private val vehicle = Vehicle(context)
@@ -77,6 +79,7 @@ class VehicleGateway(
         override fun run() {
             if (stopped) return
             readBattery()
+            readRange()
             handler.postDelayed(this, BATTERY_POLL_MS)
         }
     }
@@ -273,6 +276,18 @@ class VehicleGateway(
                 { error ->
                     Log.w(TAG, "배터리 조회 실패", error)
                     handler.post { onBattery(null) }
+                },
+            )
+        }
+    }
+
+    private fun readRange() {
+        guarded("주행 가능 거리 조회") {
+            vehicle.getOdometer().getRangeRemainingDistance(
+                { value -> handler.post { onRange(value) } },
+                { error ->
+                    Log.w(TAG, "주행 가능 거리 조회 실패", error)
+                    handler.post { onRange(null) }
                 },
             )
         }

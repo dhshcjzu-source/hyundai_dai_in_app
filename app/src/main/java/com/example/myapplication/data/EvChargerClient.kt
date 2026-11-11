@@ -6,6 +6,7 @@ import android.util.Log
 import com.example.myapplication.data.SimulatedChargingNetwork.LiveUpdate
 import com.example.myapplication.data.SimulatedChargingNetwork.StationPlan
 import com.example.myapplication.data.TmapChargerClient.Candidate
+import com.example.myapplication.model.ChargerSpeed
 import com.example.myapplication.model.GeoPoint
 import org.w3c.dom.Element
 import java.net.HttpURLConnection
@@ -169,6 +170,7 @@ class EvChargerClient(private val serviceKey: String) {
                         charging = remaining.count { it != null },
                         chargerIds = known.map { it.chargerId },
                         remainingSeconds = remaining,
+                        speeds = known.map { speedOf(it.chargerType, it.outputKw) },
                     )
                 }
 
@@ -187,11 +189,21 @@ class EvChargerClient(private val serviceKey: String) {
          * 급속은 40분, 완속은 4시간으로 본다.
          */
         fun estimateRemainingSeconds(row: ChargerRow, nowMillis: Long): Int {
-            val slow = row.chargerType in SLOW_TYPES || (row.outputKw != null && row.outputKw <= 11)
+            val slow = speedOf(row.chargerType, row.outputKw) == ChargerSpeed.SLOW
             val session = if (slow) SLOW_SESSION_SECONDS else FAST_SESSION_SECONDS
             val started = row.chargingSince?.let(::parseTime) ?: return session / 2
             val elapsed = ((nowMillis - started) / 1000).toInt()
             return (session - elapsed).coerceAtLeast(MIN_REMAINING_SECONDS)
+        }
+
+        /**
+         * 환경부 충전기 타입 코드(chgerType)와 출력(kW)으로 급속/완속을 가른다.
+         * 02(AC완속), 08(DC콤보 완속)이거나 11kW 이하면 완속, 그 밖의 알려진 코드는 급속이다.
+         */
+        fun speedOf(chargerType: String, outputKw: Int?): ChargerSpeed? = when {
+            chargerType in SLOW_TYPES || (outputKw != null && outputKw <= 11) -> ChargerSpeed.SLOW
+            outputKw != null || chargerType.isNotBlank() -> ChargerSpeed.FAST
+            else -> null
         }
 
         private fun parseTime(value: String): Long? = try {
